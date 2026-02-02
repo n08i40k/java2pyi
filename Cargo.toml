@@ -1,0 +1,14 @@
+[workspace]
+members = [".", "java-ast-parser"]
+
+[package]
+name = "java-to-pyi"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+java-ast-parser = { path = "./java-ast-parser/" }
+lalrpop-util = "*"
+itertools = "*"
+topo_sort = "*"
+bimap = "*"

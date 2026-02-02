@@ -1,0 +1,198 @@
+use crate::{ast, lexer};
+
+grammar<'input>(input: &'input str);
+
+extern {
+    type Location = usize;
+    type Error = lexer::LexicalError<'input>;
+
+    enum lexer::Token<'input> {
+        "=" => lexer::Token::Eq,
+        "*" => lexer::Token::Multiply,
+        "&" => lexer::Token::Ampersand,
+        ":" => lexer::Token::Colon,
+        ";" => lexer::Token::Semicolon,
+        "," => lexer::Token::Comma,
+        "." => lexer::Token::Period,
+
+        "(" => lexer::Token::OpenPth,
+        ")" => lexer::Token::ClosePth,
+        "[" => lexer::Token::OpenBracket,
+        "]" => lexer::Token::CloseBracket,
+        "{" => lexer::Token::OpenBrace,
+        "}" => lexer::Token::CloseBrace,
+        "<" => lexer::Token::OpenAngle,
+        ">" => lexer::Token::CloseAngle,
+
+        Boolean => lexer::Token::Boolean(<bool>),
+        Integer => lexer::Token::Integer(<i64>),
+
+        "abstract" => lexer::Token::KeywordAbstract,
+        "assert" => lexer::Token::KeywordAssert,
+        "break" => lexer::Token::KeywordBreak,
+        "case" => lexer::Token::KeywordCase,
+        "catch" => lexer::Token::KeywordCatch,
+        "class" => lexer::Token::KeywordClass,
+        "continue" => lexer::Token::KeywordContinue,
+        "const" => lexer::Token::KeywordConst,
+        "default" => lexer::Token::KeywordDefault,
+        "do" => lexer::Token::KeywordDo,
+        "else" => lexer::Token::KeywordElse,
+        "enum" => lexer::Token::KeywordEnum,
+        "exports" => lexer::Token::KeywordExports,
+        "extends" => lexer::Token::KeywordExtends,
+        "final" => lexer::Token::KeywordFinal,
+        "finally" => lexer::Token::KeywordFinally,
+        "for" => lexer::Token::KeywordFor,
+        "goto" => lexer::Token::KeywordGoto,
+        "if" => lexer::Token::KeywordIf,
+        "implements" => lexer::Token::KeywordImplements,
+        "import" => lexer::Token::KeywordImport,
+        "instanceof" => lexer::Token::KeywordInstanceof,
+        "interface" => lexer::Token::KeywordInterface,
+        "module" => lexer::Token::KeywordModule,
+        "native" => lexer::Token::KeywordNative,
+        "new" => lexer::Token::KeywordNew,
+        "package" => lexer::Token::KeywordPackage,
+        "private" => lexer::Token::KeywordPrivate,
+        "protected" => lexer::Token::KeywordProtected,
+        "public" => lexer::Token::KeywordPublic,
+        "requires" => lexer::Token::KeywordRequires,
+        "return" => lexer::Token::KeywordReturn,
+        "static" => lexer::Token::KeywordStatic,
+        "strictfp" => lexer::Token::KeywordStrictfp,
+        "super" => lexer::Token::KeywordSuper,
+        "switch" => lexer::Token::KeywordSwitch,
+        "synchronized" => lexer::Token::KeywordSynchronized,
+        "this" => lexer::Token::KeywordThis,
+        "throw" => lexer::Token::KeywordThrow,
+        "throws" => lexer::Token::KeywordThrows,
+        "transient" => lexer::Token::KeywordTransient,
+        "try" => lexer::Token::KeywordTry,
+        "var" => lexer::Token::KeywordVar,
+        "volatile" => lexer::Token::KeywordVolatile,
+        "while" => lexer::Token::KeywordWhile,
+
+        "void" => lexer::Token::TypeVoid,
+        "boolean" => lexer::Token::TypeBoolean,
+        "char" => lexer::Token::TypeChar,
+        "short" => lexer::Token::TypeShort,
+        "int" => lexer::Token::TypeInt,
+        "long" => lexer::Token::TypeLong,
+        "float" => lexer::Token::TypeFloat,
+        "double" => lexer::Token::TypeDouble,
+
+        String => lexer::Token::String(<&'input str>),
+        Ident => lexer::Token::Ident(<&'input str>),
+    }
+}
+
+#[inline]
+Path: &'input str = <l:@L> Ident ("." Ident)* <r:@R> => &input[l..r];
+
+Package: &'input str = "package" <p:Path> ";" => p;
+
+#[inline]
+ImportPath: &'input str = <l:@L> Ident ("." Ident)* ("." "*")? <r:@R> => &input[l..r];
+Import: &'input str = "import" <p:ImportPath> ";" => p;
+
+Modifier: ast::Modifiers = {
+  "public" => ast::Modifiers::PUBLIC,
+  "private" => ast::Modifiers::PRIVATE,
+  "protected" => ast::Modifiers::PROTECTED,
+  "static" => ast::Modifiers::STATIC,
+  "final" => ast::Modifiers::FINAL,       
+  "abstract" => ast::Modifiers::ABSTRACT,    
+  "native" => ast::Modifiers::NATIVE,      
+  "synchronized" => ast::Modifiers::SYNCHRONIZED,
+  "transient" => ast::Modifiers::TRANSIENT,   
+  "volatile" => ast::Modifiers::VOLATILE,    
+  "strictfp" => ast::Modifiers::STRICTFP,    
+}
+
+Modifiers: ast::Modifiers = <mods:Modifier*> => mods.into_iter().reduce(|a, b| a | b).unwrap_or(ast::Modifiers::empty());
+
+CommaList<T>: Box<[T]> = <first:T> <mut rest:("," <T>)*> => { rest.insert(0, first); rest.into_boxed_slice() };
+AmpersandList<T>: Box<[T]> = <first:T> <mut rest:("&" <T>)*> => { rest.insert(0, first); rest.into_boxed_slice() };
+
+TypeName: ast::TypeName = {
+  "void" => ast::TypeName::Void,
+  "boolean" => ast::TypeName::Boolean,
+  "char" => ast::TypeName::Char,
+  "short" => ast::TypeName::Short,
+  "int" => ast::TypeName::Integer,
+  "long" => ast::TypeName::Long,
+  "float" => ast::TypeName::Float,
+  "double" => ast::TypeName::Double,
+  <i:Path> => ast::TypeName::Ident(i.to_string()),
+};
+
+#[inline]
+TypeGenerics: Box<[ast::Type]> = "<" <l:CommaList<Type>?> ">" => l.unwrap_or(Box::from([]));
+
+ArrayType: ast::Type = <mut t:Type> "[" "]" => { t.array = true; t };
+
+Type: ast::Type = {
+  <n:TypeName> <g:TypeGenerics?> => ast::Type {
+    name: n,
+    generics: g.unwrap_or(Box::from([])),
+    array: false,
+  },
+  
+  <t:ArrayType> => t,
+};
+
+
+Variables: Box<[ast::Variable]> 
+  = <m:Modifiers> <t:Type> <i:CommaList<Ident>> ";" 
+  => ast::Variable::new_array(m, t, i);
+
+FunctionGenericsExtends: Box<[ast::Type]> = "extends" <e:AmpersandList<Type>> => e;
+
+FunctionGeneric: ast::FunctionGeneric
+  = <i:Ident> <e:FunctionGenericsExtends>
+  => ast::FunctionGeneric { ident: i.to_string(), extends: e };
+
+#[inline]
+FunctionGenerics: Box<[ast::FunctionGeneric]>
+  = "<" <g:CommaList<FunctionGeneric>> ">"
+  => g;
+
+FunctionArgument: ast::FunctionArgument
+  = <t:Type> <i:Ident>
+  => ast::FunctionArgument {
+    r#type: t,
+    ident: i.to_string() 
+  };
+
+Function: ast::Function
+  = <m:Modifiers> <g:FunctionGenerics?> <rt:Type> <i:Ident> "(" <args:CommaList<FunctionArgument>?> ")" "{" "}"
+  => ast::Function {
+    modifiers: m,
+    generics: g.unwrap_or(Box::from([])),
+    return_type: rt,
+    ident: i.to_string(),
+    arguments: args.unwrap_or(Box::from([]))
+  };
+
+ClassEntry: ast::ClassEntry = {
+  <v:Variables> => ast::ClassEntry::Variables(v),
+  <f:Function> => ast::ClassEntry::Function(f),
+  <c:Class> => ast::ClassEntry::Class(c),
+};
+
+#[inline]
+ClassExtends: ast::Type = "extends" <t:Type> => t;
+ClassImplements: Box<[ast::Type]> = "implements" <l:CommaList<Type>> => l;
+
+Class: ast::Class
+  = <m:Modifiers> "class" <i:Ident> <ex:ClassExtends?> <im:ClassImplements?> "{" <en:ClassEntry*> "}" 
+  => ast::Class::from((m, i, ex, im, en));
+
+pub Root: ast::Root
+  = <p:Package> <i:Import*> <c:Class*>
+  => ast::Root {
+    package: p.to_string(),
+    imports: i.into_iter().map(String::from).collect(),
+    classes: c.into_iter().map(|x| std::rc::Rc::from(std::cell::RefCell::from(x)).into()).collect::<Box<_>>()
+  };
