@@ -1,4 +1,9 @@
-use std::{fs, path::PathBuf, rc::Rc};
+use std::{
+    env,
+    fs,
+    path::{Path, PathBuf},
+    rc::Rc,
+};
 
 use crate::preprocess::{parse_java_ast, preprocess_asts};
 use crate::pyi::generate_pyi_by_package;
@@ -8,23 +13,50 @@ mod preprocess;
 mod pyi;
 
 fn main() {
-    let asts = [
-        parse_java_ast("java/example1.java").unwrap(),
-        parse_java_ast("java/example2.java").unwrap(),
-        parse_java_ast("java/example3.java").unwrap(),
-    ]
-    .into_iter()
-    .map(Rc::new)
-    .collect::<Box<_>>();
+    let options = match parse_args(env::args().collect()) {
+        Ok(options) => options,
+        Err(message) => {
+            if message != "help requested" {
+                eprintln!("{}", message);
+                eprintln!();
+            }
+            eprintln!("{}", usage());
+            return;
+        }
+    };
+
+    let files = match collect_java_files(&options.inputs) {
+        Ok(files) => files,
+        Err(message) => {
+            eprintln!("{}", message);
+            return;
+        }
+    };
+
+    if files.is_empty() {
+        eprintln!("no .java files found in provided inputs");
+        return;
+    }
+
+    let mut asts = Vec::new();
+    for file in files {
+        match parse_java_ast(&file) {
+            Some(ast) => asts.push(Rc::new(ast)),
+            None => eprintln!("failed to parse {}", file.display()),
+        }
+    }
+
+    if asts.is_empty() {
+        eprintln!("no parsable .java files found");
+        return;
+    }
 
     preprocess_asts(&asts, true).unwrap();
 
-    let namespace_prefix = Some("javai");
-    let outputs = generate_pyi_by_package(&asts, namespace_prefix);
-    let out_dir = PathBuf::from("out");
+    let outputs = generate_pyi_by_package(&asts, options.namespace_prefix.as_deref());
 
     for (package, contents) in outputs {
-        let file_path = package_to_path(&out_dir, &package, namespace_prefix);
+        let file_path = package_to_path(&options.out_dir, &package, options.namespace_prefix.as_deref());
         if let Some(parent) = file_path.parent() {
             fs::create_dir_all(parent).unwrap();
         }
@@ -34,11 +66,11 @@ fn main() {
 }
 
 fn package_to_path(
-    out_dir: &PathBuf,
+    out_dir: &Path,
     package: &str,
     namespace_prefix: Option<&str>,
 ) -> PathBuf {
-    let mut path = out_dir.clone();
+    let mut path = PathBuf::from(out_dir);
 
     if let Some(prefix) = namespace_prefix {
         for part in prefix.trim_matches('.').split('.') {
@@ -59,4 +91,115 @@ fn package_to_path(
 
     path.push("__init__.pyi");
     path
+}
+
+struct CliOptions {
+    inputs: Vec<PathBuf>,
+    out_dir: PathBuf,
+    namespace_prefix: Option<String>,
+}
+
+fn parse_args(args: Vec<String>) -> Result<CliOptions, String> {
+    let mut inputs = Vec::new();
+    let mut out_dir = PathBuf::from("out");
+    let mut namespace_prefix = None;
+
+    let mut iter = args.into_iter();
+    let _program = iter.next();
+
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "-i" | "--input" => {
+                let value = iter.next().ok_or_else(|| "missing value for --input".to_string())?;
+                inputs.push(PathBuf::from(value));
+            }
+            "-o" | "--out" => {
+                let value = iter.next().ok_or_else(|| "missing value for --out".to_string())?;
+                out_dir = PathBuf::from(value);
+            }
+            "-p" | "--prefix" | "--namespace" => {
+                let value = iter.next().ok_or_else(|| "missing value for --prefix".to_string())?;
+                let trimmed = value.trim().trim_matches('.').to_string();
+                if !trimmed.is_empty() {
+                    namespace_prefix = Some(trimmed);
+                }
+            }
+            "-h" | "--help" => {
+                return Err(String::from("help requested"));
+            }
+            _ => {
+                if arg.starts_with('-') {
+                    return Err(format!("unknown option: {}", arg));
+                }
+                inputs.push(PathBuf::from(arg));
+            }
+        }
+    }
+
+    if inputs.is_empty() {
+        return Err(String::from("no inputs provided"));
+    }
+
+    Ok(CliOptions {
+        inputs,
+        out_dir,
+        namespace_prefix,
+    })
+}
+
+fn usage() -> String {
+    [
+        "Usage:",
+        "  java-to-pyi -i <path> [-i <path> ...] [--prefix <pkg>] [--out <dir>]",
+        "",
+        "Options:",
+        "  -i, --input <path>      Input file or directory (recurses for .java)",
+        "  -p, --prefix <pkg>      Namespace prefix (e.g. java_interop)",
+        "  -o, --out <dir>         Output directory (default: out)",
+        "  -h, --help              Show this help",
+    ]
+    .join("\n")
+}
+
+fn collect_java_files(inputs: &[PathBuf]) -> Result<Vec<PathBuf>, String> {
+    let mut files = Vec::new();
+
+    for input in inputs {
+        let metadata = fs::metadata(input)
+            .map_err(|err| format!("failed to read {}: {}", input.display(), err))?;
+
+        if metadata.is_file() {
+            if is_java_file(input) {
+                files.push(input.clone());
+            }
+        } else if metadata.is_dir() {
+            collect_java_files_in_dir(input, &mut files)?;
+        }
+    }
+
+    Ok(files)
+}
+
+fn collect_java_files_in_dir(dir: &Path, files: &mut Vec<PathBuf>) -> Result<(), String> {
+    for entry in fs::read_dir(dir)
+        .map_err(|err| format!("failed to read {}: {}", dir.display(), err))?
+    {
+        let entry = entry.map_err(|err| format!("failed to read {}: {}", dir.display(), err))?;
+        let path = entry.path();
+        let metadata = entry
+            .metadata()
+            .map_err(|err| format!("failed to read {}: {}", path.display(), err))?;
+
+        if metadata.is_dir() {
+            collect_java_files_in_dir(&path, files)?;
+        } else if metadata.is_file() && is_java_file(&path) {
+            files.push(path);
+        }
+    }
+
+    Ok(())
+}
+
+fn is_java_file(path: &Path) -> bool {
+    path.extension().and_then(|ext| ext.to_str()) == Some("java")
 }
