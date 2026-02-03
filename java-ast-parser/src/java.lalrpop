@@ -156,15 +156,14 @@ Variables: Box<[ast::Variable]>
   = <m:Modifiers> <t:Type> <i:CommaList<Ident>> ";" 
   => ast::Variable::new_array(m, t, i);
 
-FunctionGenericsExtends: Box<[ast::Type]> = "extends" <e:AmpersandList<Type>> => e;
+GenericDefinitionsExtends: Box<[ast::Type]> = "extends" <e:AmpersandList<Type>> => e;
 
-FunctionGeneric: ast::FunctionGeneric
-  = <i:Ident> <e:FunctionGenericsExtends>
-  => ast::FunctionGeneric { ident: i.to_string(), extends: e };
+GenericDefinition: ast::GenericDefinition
+  = <i:Ident> <e:GenericDefinitionsExtends?>
+  => ast::GenericDefinition { ident: i.to_string(), extends: e.unwrap_or(Box::new([])) };
 
-#[inline]
-FunctionGenerics: Box<[ast::FunctionGeneric]>
-  = "<" <g:CommaList<FunctionGeneric>> ">"
+GenericDefinitions: Box<[ast::GenericDefinition]>
+  = "<" <g:CommaList<GenericDefinition>> ">"
   => g;
 
 FunctionArgument: ast::FunctionArgument
@@ -180,7 +179,7 @@ FunctionArgument: ast::FunctionArgument
 FunctionEnd: () = { "{" "}", ";" };
 
 Function: ast::Function
-  = <m:Modifiers> <g:FunctionGenerics?> <rt:Type> <i:Ident?> "(" <args:CommaList<FunctionArgument>?> ")" ("throws" CommaList<Type>)? FunctionEnd
+  = <m:Modifiers> <g:GenericDefinitions?> <rt:Type> <i:Ident?> "(" <args:CommaList<FunctionArgument>?> ")" ("throws" CommaList<Type>)? FunctionEnd
   => ast::Function {
     modifiers: m,
     generics: g.unwrap_or(Box::from([])),
@@ -200,8 +199,8 @@ InterfaceEntry: ast::InterfaceEntry = {
 InterfaceExtends: Box<[ast::Type]> = "extends" <t:CommaList<Type>> => t;
 
 Interface: ast::Interface
-  = <m:Modifiers> "interface" <i:Ident> <ex:InterfaceExtends?> "{" <e:InterfaceEntry*> "}"
-  => ast::Interface::from((m, i, ex, e));
+  = <m:Modifiers> "interface" <i:Ident> <g:GenericDefinitions?> <ex:InterfaceExtends?> "{" <e:InterfaceEntry*> "}"
+  => ast::Interface::from((m, i, g, ex, e));
 
 ClassEntry: ast::ClassEntry = {
   <v:Variables> => ast::ClassEntry::Variables(v),
@@ -217,8 +216,8 @@ ClassImplements: Box<[ast::Type]> = "implements" <l:CommaList<Type>> => l;
 ClassExtends: ast::Type = "extends" <t:Type> => t;
 
 Class: ast::Class
-  = <m:Modifiers> "class" <i:Ident> <ex:ClassExtends?> <im:ClassImplements?> "{" <en:ClassEntry*> "}" ";"?
-  => ast::Class::from((m, i, ex, im, en));
+  = <m:Modifiers> "class" <i:Ident> <g:GenericDefinitions?> <ex:ClassExtends?> <im:ClassImplements?> "{" <en:ClassEntry*> "}" ";"?
+  => ast::Class::from((m, i, g, ex, im, en));
 
 
 RootEntry: ast::RootEntry = {

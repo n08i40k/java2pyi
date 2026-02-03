@@ -157,7 +157,7 @@ impl Variable {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct FunctionGeneric {
+pub struct GenericDefinition {
     pub ident: String,
     pub extends: Box<[Type]>,
 }
@@ -173,7 +173,7 @@ pub struct FunctionArgument {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Function {
     pub modifiers: Modifiers,
-    pub generics: Box<[FunctionGeneric]>,
+    pub generics: Box<[GenericDefinition]>,
     pub return_type: Type,
     pub ident: String,
     pub arguments: Box<[FunctionArgument]>,
@@ -193,6 +193,7 @@ pub(super) enum ClassEntry {
 pub struct Class {
     pub modifiers: Modifiers,
     pub ident: String,
+    pub generics: Box<[GenericDefinition]>,
 
     pub extends: Option<Type>,
     pub implements: Box<[Type]>,
@@ -216,6 +217,7 @@ impl
     From<(
         Modifiers,
         &str,
+        Option<Box<[GenericDefinition]>>,
         Option<Type>,
         Option<Box<[Type]>>,
         Vec<ClassEntry>,
@@ -225,12 +227,13 @@ impl
         value: (
             Modifiers,
             &str,
+            Option<Box<[GenericDefinition]>>,
             Option<Type>,
             Option<Box<[Type]>>,
             Vec<ClassEntry>,
         ),
     ) -> Self {
-        let (modifiers, ident, extends, implements, entries) = value;
+        let (modifiers, ident, generics, extends, implements, entries) = value;
 
         let mut variables = Vec::new();
         let mut functions = Vec::new();
@@ -250,6 +253,7 @@ impl
         Self {
             modifiers,
             ident: ident.to_string(),
+            generics: generics.unwrap_or(Box::new([])),
             extends,
             implements: implements.unwrap_or(Box::from([])),
             variables: variables.into_boxed_slice(),
@@ -272,6 +276,7 @@ pub(super) enum InterfaceEntry {
 pub struct Interface {
     pub modifiers: Modifiers,
     pub ident: String,
+    pub generics: Box<[GenericDefinition]>,
 
     pub extends: Box<[Type]>,
 
@@ -284,9 +289,25 @@ pub struct Interface {
 
 pub type InterfaceCell = ObjectCell<Interface>;
 
-impl From<(Modifiers, &str, Option<Box<[Type]>>, Vec<InterfaceEntry>)> for Interface {
-    fn from(value: (Modifiers, &str, Option<Box<[Type]>>, Vec<InterfaceEntry>)) -> Self {
-        let (modifiers, ident, extends, entries) = value;
+impl
+    From<(
+        Modifiers,
+        &str,
+        Option<Box<[GenericDefinition]>>,
+        Option<Box<[Type]>>,
+        Vec<InterfaceEntry>,
+    )> for Interface
+{
+    fn from(
+        value: (
+            Modifiers,
+            &str,
+            Option<Box<[GenericDefinition]>>,
+            Option<Box<[Type]>>,
+            Vec<InterfaceEntry>,
+        ),
+    ) -> Self {
+        let (modifiers, ident, generics, extends, entries) = value;
 
         let mut variables = Vec::new();
         let mut functions = Vec::new();
@@ -307,6 +328,7 @@ impl From<(Modifiers, &str, Option<Box<[Type]>>, Vec<InterfaceEntry>)> for Inter
             ident: ident.to_string(),
             extends: extends.unwrap_or(Box::new([])),
             variables: variables.into_boxed_slice(),
+            generics: generics.unwrap_or(Box::new([])),
             functions: functions.into_boxed_slice(),
             classes: classes.into_iter().map(ClassCell::from).collect(),
             interfaces: interfaces.into_iter().map(InterfaceCell::from).collect(),
