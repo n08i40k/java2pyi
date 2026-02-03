@@ -194,7 +194,7 @@ ClassExtends: ast::Type = "extends" <t:Type> => t;
 ClassImplements: Box<[ast::Type]> = "implements" <l:CommaList<Type>> => l;
 
 Class: ast::Class
-  = <m:Modifiers> "class" <i:Ident> <ex:ClassExtends?> <im:ClassImplements?> "{" <en:ClassEntry*> "}" 
+  = <m:Modifiers> "class" <i:Ident> <ex:ClassExtends?> <im:ClassImplements?> "{" <en:ClassEntry*> "}" ";"?
   => ast::Class::from((m, i, ex, im, en));
 
 pub Root: ast::Root
