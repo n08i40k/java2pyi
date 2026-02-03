@@ -1,10 +1,11 @@
 use crate::{ast, lexer};
+use std::borrow::Cow;
 
 grammar<'input>(input: &'input str);
 
 extern {
     type Location = usize;
-    type Error = lexer::LexicalError<'input>;
+    type Error = lexer::LexicalError;
 
     enum lexer::Token<'input> {
         "=" => lexer::Token::Eq,
@@ -84,19 +85,19 @@ extern {
         "float" => lexer::Token::TypeFloat,
         "double" => lexer::Token::TypeDouble,
 
-        String => lexer::Token::String(<&'input str>),
-        Ident => lexer::Token::Ident(<&'input str>),
+        String => lexer::Token::String(<Cow<'input, str>>),
+        Ident => lexer::Token::Ident(<Cow<'input, str>>),
     }
 }
 
 #[inline]
-Path: &'input str = <l:@L> Ident ("." Ident)* <r:@R> => &input[l..r];
+Path: Cow<'input, str> = <l:@L> Ident ("." Ident)* <r:@R> => Cow::from(&input[l..r]);
 
-Package: &'input str = "package" <p:Path> ";" => p;
+Package: Cow<'input, str> = "package" <p:Path> ";" => p;
 
 #[inline]
-ImportPath: &'input str = <l:@L> Ident ("." Ident)* ("." "*")? <r:@R> => &input[l..r];
-Import: &'input str = "import" "static"? <p:ImportPath> ";" => p;
+ImportPath: Cow<'input, str> = <l:@L> Ident ("." Ident)* ("." "*")? <r:@R> => Cow::from(&input[l..r]);
+Import: Cow<'input, str> = "import" "static"? <p:ImportPath> ";" => p;
 
 Modifier: ast::Modifiers = {
   "public" => ast::Modifiers::PUBLIC,
@@ -184,7 +185,7 @@ Function: ast::Function
     modifiers: m,
     generics: g.unwrap_or(Box::from([])),
     return_type: rt,
-    ident: i.unwrap_or("constructor").to_string(),
+    ident: i.unwrap_or_else(|| Cow::from("constructor")).to_string(),
     arguments: args.unwrap_or(Box::from([]))
   };
 

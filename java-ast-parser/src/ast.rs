@@ -1,5 +1,6 @@
 use bitflags::bitflags;
 use ownable::traits::IntoOwned;
+use std::borrow::Cow;
 use std::cell::RefCell;
 use std::ops::Deref;
 use std::rc::Rc;
@@ -144,7 +145,11 @@ pub struct Variable {
 }
 
 impl Variable {
-    pub fn new_array(modifiers: Modifiers, r#type: Type, idents: Box<[&str]>) -> Box<[Self]> {
+    pub fn new_array(
+        modifiers: Modifiers,
+        r#type: Type,
+        idents: Box<[Cow<'_, str>]>,
+    ) -> Box<[Self]> {
         idents
             .into_iter()
             .map(|ident| Self {
@@ -216,7 +221,7 @@ pub type ClassCell = ObjectCell<Class>;
 impl
     From<(
         Modifiers,
-        &str,
+        Cow<'_, str>,
         Option<Box<[GenericDefinition]>>,
         Option<Type>,
         Option<Box<[Type]>>,
@@ -226,7 +231,7 @@ impl
     fn from(
         value: (
             Modifiers,
-            &str,
+            Cow<'_, str>,
             Option<Box<[GenericDefinition]>>,
             Option<Type>,
             Option<Box<[Type]>>,
@@ -292,7 +297,7 @@ pub type InterfaceCell = ObjectCell<Interface>;
 impl
     From<(
         Modifiers,
-        &str,
+        Cow<'_, str>,
         Option<Box<[GenericDefinition]>>,
         Option<Box<[Type]>>,
         Vec<InterfaceEntry>,
@@ -301,7 +306,7 @@ impl
     fn from(
         value: (
             Modifiers,
-            &str,
+            Cow<'_, str>,
             Option<Box<[GenericDefinition]>>,
             Option<Box<[Type]>>,
             Vec<InterfaceEntry>,
@@ -350,8 +355,8 @@ pub struct Root {
     pub interfaces: Box<[InterfaceCell]>,
 }
 
-impl From<(&str, Vec<&str>, Vec<RootEntry>)> for Root {
-    fn from(value: (&str, Vec<&str>, Vec<RootEntry>)) -> Self {
+impl From<(Cow<'_, str>, Vec<Cow<'_, str>>, Vec<RootEntry>)> for Root {
+    fn from(value: (Cow<'_, str>, Vec<Cow<'_, str>>, Vec<RootEntry>)) -> Self {
         let (package, imports, entries) = value;
 
         let mut classes = Vec::new();

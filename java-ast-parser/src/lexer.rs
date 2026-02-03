@@ -10,12 +10,9 @@
 //! ```
 
 use logos::{Logos, Span};
+use ownable::IntoOwned;
 use std::{
-    cell::RefCell,
-    collections::VecDeque,
-    num::{IntErrorKind, ParseIntError},
-    ops::DerefMut,
-    rc::Rc,
+    borrow::Cow, cell::RefCell, collections::VecDeque, num::ParseIntError, ops::DerefMut, rc::Rc,
 };
 
 /// Categories of lexical errors produced by [`Lexer`].
@@ -34,54 +31,18 @@ impl From<ParseIntError> for LexicalErrorKind {
 
 /// Error emitted when the lexer cannot produce a valid token.
 #[derive(Debug, Clone, PartialEq)]
-pub struct LexicalError<'a> {
-    kind: LexicalErrorKind,
-    input: &'a str,
-    span: Span,
+pub struct LexicalError {
+    pub kind: LexicalErrorKind,
+    pub span: Span,
 }
 
-impl<'a> std::fmt::Display for LexicalError<'a> {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        let line = self.input[..self.span.start]
-            .chars()
-            .filter(|&ch| ch == '\n')
-            .count()
-            + 1;
-
-        let column = self.span.start - self.input[..self.span.start].rfind("\n").unwrap_or(0);
-
-        let position = format!("line {}, column {}", line, column);
-
-        match &self.kind {
-            LexicalErrorKind::InvalidToken => write!(
-                f,
-                "Invalid token \"{}\" at {}",
-                &self.input[self.span.start..self.span.end],
-                position
-            )?,
-            LexicalErrorKind::InvalidInteger(inner) => write!(
-                f,
-                "Invalid number {} at {}: {}",
-                &self.input[self.span.start..self.span.end],
-                position,
-                match inner.kind() {
-                    IntErrorKind::PosOverflow | IntErrorKind::NegOverflow => "overflow",
-                    _ => "unknown",
-                }
-            )?,
-        };
-
-        Ok(())
-    }
-}
-
-fn string_from_lexer<'a>(lex: &mut logos::Lexer<'a, Token<'a>>) -> &'a str {
+fn string_from_lexer<'a>(lex: &mut logos::Lexer<'a, Token<'a>>) -> Cow<'a, str> {
     let slice = lex.slice();
-    &slice[1..slice.len() - 1]
+    Cow::from(&slice[1..slice.len() - 1])
 }
 
 /// Token kinds produced by the lexer.
-#[derive(Clone, Debug, PartialEq, Logos)]
+#[derive(Clone, Debug, PartialEq, Logos, IntoOwned)]
 #[logos(error = LexicalErrorKind)]
 #[logos(skip r"[\s\t\n\f]+")]
 #[logos(skip(r"//.*", allow_greedy = true))]
@@ -334,10 +295,10 @@ pub enum Token<'a> {
 
     #[regex(r#"'((?:[^'\n]|(?:\\\'))*)'"#, string_from_lexer)]
     #[regex(r#""((?:[^"\n]|(?:\\\"))*)""#, string_from_lexer)]
-    String(&'a str),
+    String(Cow<'a, str>),
 
-    #[regex(r"[a-zA-Z_][a-zA-Z_0-9]*", priority = 0)]
-    Ident(&'a str),
+    #[regex(r"[a-zA-Z_][a-zA-Z_0-9]*", |x| Cow::from(x.slice()), priority = 0)]
+    Ident(Cow<'a, str>),
 }
 
 impl<'a> std::fmt::Display for Token<'a> {
@@ -371,7 +332,7 @@ impl<'input> Lexer<'input> {
 pub type Spanned<Tok, Loc, Error> = Result<(Loc, Tok, Loc), Error>;
 
 impl<'input> Iterator for Lexer<'input> {
-    type Item = Spanned<Token<'input>, usize, LexicalError<'input>>;
+    type Item = Spanned<Token<'input>, usize, LexicalError>;
 
     fn next(&mut self) -> Option<Self::Item> {
         let (tok, span) = self.inner.next()?;
@@ -379,11 +340,7 @@ impl<'input> Iterator for Lexer<'input> {
         let tok = match tok {
             Ok(tok) => tok,
             Err(kind) => {
-                return Some(Err(LexicalError {
-                    kind,
-                    input: self.inner.source(),
-                    span,
-                }));
+                return Some(Err(LexicalError { kind, span }));
             }
         };
 
@@ -425,11 +382,7 @@ impl<'input> Iterator for Lexer<'input> {
                         let tok = match tok {
                             Ok(tok) => tok,
                             Err(kind) => {
-                                return Some(Err(LexicalError {
-                                    kind,
-                                    input: self.inner.source(),
-                                    span,
-                                }));
+                                return Some(Err(LexicalError { kind, span }));
                             }
                         };
 
@@ -441,7 +394,6 @@ impl<'input> Iterator for Lexer<'input> {
                                 if expr_level == 0 {
                                     return Some(Err(LexicalError {
                                         kind: LexicalErrorKind::InvalidToken,
-                                        input: self.inner.source(),
                                         span,
                                     }));
                                 }
@@ -470,11 +422,7 @@ impl<'input> Iterator for Lexer<'input> {
                     let tok = match tok {
                         Ok(tok) => tok,
                         Err(kind) => {
-                            return Some(Err(LexicalError {
-                                kind,
-                                input: self.inner.source(),
-                                span,
-                            }));
+                            return Some(Err(LexicalError { kind, span }));
                         }
                     };
 

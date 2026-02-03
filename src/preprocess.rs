@@ -14,31 +14,12 @@ use crate::index_table::{
 };
 
 /// Parse ast and convert it to owned ("disconnect" from string).
-pub fn parse_java_ast<P: AsRef<Path>>(path: P) -> Option<ast::Root> {
+pub fn parse_java_ast<P: AsRef<Path>>(
+    path: P,
+) -> std::result::Result<java_ast_parser::ast::Root, Box<java_ast_parser::ErrorCell<'static>>> {
     let data = fs::read_to_string(path).unwrap();
 
-    let mut ast = match java_ast_parser::parse(&data) {
-        Ok(ast) => ast,
-        Err(e) => {
-            match &e {
-                lalrpop_util::ParseError::UnrecognizedToken { token, expected: _ } => {
-                    let line = data[..token.0].chars().filter(|&ch| ch == '\n').count() + 1;
-
-                    let column = token.0 - data[..token.0].rfind('\n').unwrap_or(0);
-
-                    let position = format!("line {}, column {}", line, column);
-                    println!("{}\n{}", e, position);
-                }
-                _ => {
-                    println!("{}", e);
-                }
-            };
-
-            return None;
-        }
-    };
-
-    Some(ast)
+    java_ast_parser::parse(&data).map_err(|x| Box::new(x.into_owned()))
 }
 
 /// ClassPtr -> Local Scope

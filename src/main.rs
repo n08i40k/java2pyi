@@ -1,6 +1,5 @@
 use std::{
-    env,
-    fs,
+    env, fs,
     path::{Path, PathBuf},
     rc::Rc,
 };
@@ -41,8 +40,14 @@ fn main() {
     let mut asts = Vec::new();
     for file in files {
         match parse_java_ast(&file) {
-            Some(ast) => asts.push(Rc::new(ast)),
-            None => eprintln!("failed to parse {}", file.display()),
+            Ok(ast) => asts.push(Rc::new(ast)),
+            Err(e) => match &e.inner {
+                java_ast_parser::Error::UnrecognizedEof { .. } => {}
+                _ => {
+                    eprintln!("failed to parse {}\n{}", file.display(), e);
+                    return;
+                }
+            },
         }
     }
 
@@ -56,7 +61,11 @@ fn main() {
     let outputs = generate_pyi_by_package(&asts, options.namespace_prefix.as_deref());
 
     for (package, contents) in outputs {
-        let file_path = package_to_path(&options.out_dir, &package, options.namespace_prefix.as_deref());
+        let file_path = package_to_path(
+            &options.out_dir,
+            &package,
+            options.namespace_prefix.as_deref(),
+        );
         if let Some(parent) = file_path.parent() {
             fs::create_dir_all(parent).unwrap();
         }
@@ -65,11 +74,7 @@ fn main() {
     }
 }
 
-fn package_to_path(
-    out_dir: &Path,
-    package: &str,
-    namespace_prefix: Option<&str>,
-) -> PathBuf {
+fn package_to_path(out_dir: &Path, package: &str, namespace_prefix: Option<&str>) -> PathBuf {
     let mut path = PathBuf::from(out_dir);
 
     if let Some(prefix) = namespace_prefix {
@@ -110,15 +115,21 @@ fn parse_args(args: Vec<String>) -> Result<CliOptions, String> {
     while let Some(arg) = iter.next() {
         match arg.as_str() {
             "-i" | "--input" => {
-                let value = iter.next().ok_or_else(|| "missing value for --input".to_string())?;
+                let value = iter
+                    .next()
+                    .ok_or_else(|| "missing value for --input".to_string())?;
                 inputs.push(PathBuf::from(value));
             }
             "-o" | "--out" => {
-                let value = iter.next().ok_or_else(|| "missing value for --out".to_string())?;
+                let value = iter
+                    .next()
+                    .ok_or_else(|| "missing value for --out".to_string())?;
                 out_dir = PathBuf::from(value);
             }
             "-p" | "--prefix" | "--namespace" => {
-                let value = iter.next().ok_or_else(|| "missing value for --prefix".to_string())?;
+                let value = iter
+                    .next()
+                    .ok_or_else(|| "missing value for --prefix".to_string())?;
                 let trimmed = value.trim().trim_matches('.').to_string();
                 if !trimmed.is_empty() {
                     namespace_prefix = Some(trimmed);
@@ -181,8 +192,8 @@ fn collect_java_files(inputs: &[PathBuf]) -> Result<Vec<PathBuf>, String> {
 }
 
 fn collect_java_files_in_dir(dir: &Path, files: &mut Vec<PathBuf>) -> Result<(), String> {
-    for entry in fs::read_dir(dir)
-        .map_err(|err| format!("failed to read {}: {}", dir.display(), err))?
+    for entry in
+        fs::read_dir(dir).map_err(|err| format!("failed to read {}: {}", dir.display(), err))?
     {
         let entry = entry.map_err(|err| format!("failed to read {}: {}", dir.display(), err))?;
         let path = entry.path();
