@@ -85,7 +85,9 @@ fn string_from_lexer<'a>(lex: &mut logos::Lexer<'a, Token<'a>>) -> &'a str {
 #[logos(error = LexicalErrorKind)]
 #[logos(skip r"[\s\t\n\f]+")]
 #[logos(skip(r"//.*", allow_greedy = true))]
-#[logos(skip(r"@[a-zA-Z.]+(\(.*\))?", allow_greedy = true))]
+#[logos(skip(
+    r"@[A-Za-z0-9.]+(?:\((?:[^()]|\((?:[^()]|\((?:[^()]|\((?:[^()]|\([^()]*\))*\))*\))*\))*\))?"
+))]
 #[logos(skip r"\/\*[^*]*\*+(?:[^\/*][^*]*\*+)*\/")]
 pub enum Token<'a> {
     #[token("=")]
