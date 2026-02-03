@@ -167,13 +167,16 @@ FunctionArgument: ast::FunctionArgument
     vararg: v.is_some(),
   };
 
+#[inline]
+FunctionEnd: () = { "{" "}", ";" };
+
 Function: ast::Function
-  = <m:Modifiers> <g:FunctionGenerics?> <rt:Type> <i:Ident> "(" <args:CommaList<FunctionArgument>?> ")" "{" "}"
+  = <m:Modifiers> <g:FunctionGenerics?> <rt:Type> <i:Ident?> "(" <args:CommaList<FunctionArgument>?> ")" FunctionEnd
   => ast::Function {
     modifiers: m,
     generics: g.unwrap_or(Box::from([])),
     return_type: rt,
-    ident: i.to_string(),
+    ident: i.unwrap_or("constructor").to_string(),
     arguments: args.unwrap_or(Box::from([]))
   };
 
