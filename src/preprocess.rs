@@ -6,7 +6,7 @@ use std::{
     rc::Rc,
 };
 
-use java_ast_parser::ast::{self, ClassCell, Modifiers};
+use java_ast_parser::ast::{self, ClassCell, InterfaceCell, Modifiers};
 use topo_sort::{SortResults, TopoSort};
 
 use crate::index_table::{
@@ -38,47 +38,7 @@ pub fn parse_java_ast<P: AsRef<Path>>(path: P) -> Option<ast::Root> {
         }
     };
 
-    strip_non_public_symbols(&mut ast);
-
     Some(ast)
-}
-
-/// Remove `private`, `protected` and `static` functions and variables from all classes in ast
-/// recursively.
-/// As we don't see them in Python (afaik).
-fn strip_non_public_symbols(ast: &mut ast::Root) {
-    fn should_keep_variable(modifiers: &Modifiers) -> bool {
-        modifiers.intersects(Modifiers::PUBLIC)
-            && !modifiers.intersects(Modifiers::STATIC | Modifiers::FINAL)
-    }
-
-    fn should_keep_function(modifiers: &Modifiers) -> bool {
-        modifiers.intersects(Modifiers::PUBLIC)
-    }
-
-    fn walk_class(class: &mut java_ast_parser::ast::Class) {
-        class.variables = class
-            .variables
-            .clone()
-            .into_iter()
-            .filter(|v| should_keep_variable(&v.modifiers))
-            .collect();
-
-        class.functions = class
-            .functions
-            .clone()
-            .into_iter()
-            .filter(|f| should_keep_function(&f.modifiers))
-            .collect();
-
-        for class in class.classes.iter_mut() {
-            walk_class(class.borrow_mut().deref_mut());
-        }
-    }
-
-    for class in ast.classes.iter_mut() {
-        walk_class(class.borrow_mut().deref_mut());
-    }
 }
 
 /// ClassPtr -> Local Scope
@@ -87,6 +47,28 @@ fn strip_non_public_symbols(ast: &mut ast::Root) {
 /// ru.n08i40k.MyClass.InnerClass -> Some("MyClass")
 fn build_local_scope_map(ast: &ast::Root) -> HashMap<ClassCell, String> {
     let mut scope_map: HashMap<ClassCell, String> = HashMap::new();
+
+    fn walk_interface(
+        scope_map: &mut HashMap<ClassCell, String>,
+        scope: Option<&str>,
+        interface_cell: &InterfaceCell,
+    ) {
+        let interface = interface_cell.borrow();
+
+        let scope = if let Some(parent) = scope {
+            format!("{}.{}", parent, &interface.ident)
+        } else {
+            interface.ident.to_string()
+        };
+
+        for class_cell in &interface.classes {
+            walk_class(scope_map, Some(&scope), class_cell);
+        }
+
+        for interface_cell in &interface.interfaces {
+            walk_interface(scope_map, Some(&scope), interface_cell);
+        }
+    }
 
     fn walk_class(
         scope_map: &mut HashMap<ClassCell, String>,
@@ -108,6 +90,14 @@ fn build_local_scope_map(ast: &ast::Root) -> HashMap<ClassCell, String> {
         for class_cell in &class.classes {
             walk_class(scope_map, Some(&scope), class_cell);
         }
+
+        for interface_cell in &class.interfaces {
+            walk_interface(scope_map, Some(&scope), interface_cell);
+        }
+    }
+
+    for interface_cell in &ast.interfaces {
+        walk_interface(&mut scope_map, None, interface_cell);
     }
 
     for class_cell in &ast.classes {
@@ -170,6 +160,20 @@ fn collect_scoped_classes<'a, T: IntoIterator<Item = &'a Scope>>(
 ) -> Box<[(ClassCell, &'a LocalIndexTable)]> {
     let mut classes: Vec<(ClassCell, &'a LocalIndexTable)> = Vec::new();
 
+    fn walk_interface<'a>(
+        classes: &mut Vec<(ClassCell, &'a LocalIndexTable)>,
+        local_index_table: &'a LocalIndexTable,
+        interface_cell: &InterfaceCell,
+    ) {
+        for class in &interface_cell.borrow().classes {
+            walk_class(classes, local_index_table, class);
+        }
+
+        for interface in &interface_cell.borrow().interfaces {
+            walk_interface(classes, local_index_table, interface);
+        }
+    }
+
     fn walk_class<'a>(
         classes: &mut Vec<(ClassCell, &'a LocalIndexTable)>,
         local_index_table: &'a LocalIndexTable,
@@ -180,9 +184,17 @@ fn collect_scoped_classes<'a, T: IntoIterator<Item = &'a Scope>>(
         for class in &class_cell.borrow().classes {
             walk_class(classes, local_index_table, class);
         }
+
+        for interface in &class_cell.borrow().interfaces {
+            walk_interface(classes, local_index_table, interface);
+        }
     }
 
     for scope in scopes {
+        for interface in &scope.ast.interfaces {
+            walk_interface(&mut classes, &scope.local_index_table, interface);
+        }
+
         for class in &scope.ast.classes {
             walk_class(&mut classes, &scope.local_index_table, class);
         }

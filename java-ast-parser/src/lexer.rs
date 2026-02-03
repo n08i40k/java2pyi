@@ -348,7 +348,7 @@ impl<'a> std::fmt::Display for Token<'a> {
 
 enum Scope {
     Root,
-    Class { in_body: bool },
+    Object { in_body: bool },
     ClassFunction,
 }
 
@@ -390,16 +390,17 @@ impl<'input> Iterator for Lexer<'input> {
         let current_scope = self.scope_stack.back().unwrap().clone();
 
         match current_scope.borrow_mut().deref_mut() {
-            Scope::Root => {
-                if let Token::KeywordClass = &tok {
+            Scope::Root => match &tok {
+                Token::KeywordClass | Token::KeywordInterface => {
                     self.scope_stack
-                        .push_back(Rc::from(RefCell::from(Scope::Class { in_body: false })));
+                        .push_back(Rc::from(RefCell::from(Scope::Object { in_body: false })));
                 }
-            }
-            Scope::Class { in_body } => match &tok {
-                Token::KeywordClass => {
+                _ => {}
+            },
+            Scope::Object { in_body } => match &tok {
+                Token::KeywordClass | Token::KeywordInterface => {
                     self.scope_stack
-                        .push_back(Rc::from(RefCell::from(Scope::Class { in_body: false })));
+                        .push_back(Rc::from(RefCell::from(Scope::Object { in_body: false })));
                 }
                 Token::OpenBrace => {
                     if !*in_body {

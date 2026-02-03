@@ -189,25 +189,43 @@ Function: ast::Function
     arguments: args.unwrap_or(Box::from([]))
   };
 
+InterfaceEntry: ast::InterfaceEntry = {
+  <v:Variables> => ast::InterfaceEntry::Variables(v),
+  <f:Function> => ast::InterfaceEntry::Function(f),
+  <c:Class> => ast::InterfaceEntry::Class(c),
+  <i:Interface> => ast::InterfaceEntry::Interface(i),
+};
+
+#[inline]
+InterfaceExtends: Box<[ast::Type]> = "extends" <t:CommaList<Type>> => t;
+
+Interface: ast::Interface
+  = <m:Modifiers> "interface" <i:Ident> <ex:InterfaceExtends?> "{" <e:InterfaceEntry*> "}"
+  => ast::Interface::from((m, i, ex, e));
+
 ClassEntry: ast::ClassEntry = {
   <v:Variables> => ast::ClassEntry::Variables(v),
   <f:Function> => ast::ClassEntry::Function(f),
   <c:Class> => ast::ClassEntry::Class(c),
+  <i:Interface> => ast::ClassEntry::Interface(i),
   "static" "{" "}" => ast::ClassEntry::Skip,
 };
 
+ClassImplements: Box<[ast::Type]> = "implements" <l:CommaList<Type>> => l;
+
 #[inline]
 ClassExtends: ast::Type = "extends" <t:Type> => t;
-ClassImplements: Box<[ast::Type]> = "implements" <l:CommaList<Type>> => l;
 
 Class: ast::Class
   = <m:Modifiers> "class" <i:Ident> <ex:ClassExtends?> <im:ClassImplements?> "{" <en:ClassEntry*> "}" ";"?
   => ast::Class::from((m, i, ex, im, en));
 
+
+RootEntry: ast::RootEntry = {
+  <c:Class> => ast::RootEntry::Class(c),
+  <i:Interface> => ast::RootEntry::Interface(i),
+};
+
 pub Root: ast::Root
-  = <p:Package> <i:Import*> <c:Class*>
-  => ast::Root {
-    package: p.to_string(),
-    imports: i.into_iter().map(String::from).collect(),
-    classes: c.into_iter().map(|x| std::rc::Rc::from(std::cell::RefCell::from(x)).into()).collect::<Box<_>>()
-  };
+  = <p:Package> <i:Import*> <e:RootEntry*>
+  => ast::Root::from((p, i, e));

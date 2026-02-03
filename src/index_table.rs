@@ -1,5 +1,5 @@
 use itertools::Itertools;
-use java_ast_parser::ast::{ClassCell, Root};
+use java_ast_parser::ast::{ClassCell, InterfaceCell, Root};
 use std::{collections::HashMap, rc::Rc};
 
 pub type IndexTable = HashMap<String, ClassCell>;
@@ -46,10 +46,7 @@ impl From<IndexTable> for ImportedIndexTable {
 }
 
 impl ImportedIndexTable {
-    pub fn from_imports<'a, I>(
-        imports: &[impl AsRef<str>],
-        qualified_index_tables: I,
-    ) -> Self
+    pub fn from_imports<'a, I>(imports: &[impl AsRef<str>], qualified_index_tables: I) -> Self
     where
         I: IntoIterator<Item = &'a QualifiedIndexTable>,
     {
@@ -108,10 +105,8 @@ impl ImportedIndexTable {
                                         format!("{}.{}", ident, remaining_idents)
                                     };
 
-                                    let class_cell = qualified_table
-                                        .idt
-                                        .get(&qualified_key.join("."))
-                                        .unwrap();
+                                    let class_cell =
+                                        qualified_table.idt.get(&qualified_key.join(".")).unwrap();
 
                                     imported_table.insert(import_key, class_cell.clone());
 
@@ -147,10 +142,8 @@ impl ImportedIndexTable {
                                     format!("{}.{}", scoped_key, remaining_idents)
                                 };
 
-                                let class_cell = qualified_table
-                                    .idt
-                                    .get(&qualified_key.join("."))
-                                    .unwrap();
+                                let class_cell =
+                                    qualified_table.idt.get(&qualified_key.join(".")).unwrap();
 
                                 imported_table.insert(import_key, class_cell.clone());
 
@@ -254,6 +247,24 @@ impl QualifiedIndexTable {
     pub fn from_ast(ast: &Root) -> Self {
         let mut index_table = IndexTable::new();
 
+        fn walk_interface(
+            index_table: &mut IndexTable,
+            parent_path: Option<&str>,
+            interface_cell: &InterfaceCell,
+        ) {
+            let interface = interface_cell.borrow();
+
+            let qualified_name = if let Some(parent_path) = parent_path {
+                format!("{}.{}", parent_path, interface.ident)
+            } else {
+                interface.ident.to_string()
+            };
+
+            for class in &interface.classes {
+                walk_class(index_table, Some(&qualified_name), class);
+            }
+        }
+
         fn walk_class(
             index_table: &mut IndexTable,
             parent_path: Option<&str>,
@@ -271,11 +282,19 @@ impl QualifiedIndexTable {
                 walk_class(index_table, Some(&qualified_name), class);
             }
 
+            for interface in &class.interfaces {
+                walk_interface(index_table, Some(&qualified_name), interface);
+            }
+
             index_table.insert(qualified_name, class_cell.clone());
         }
 
         for class in &ast.classes {
             walk_class(&mut index_table, None, class);
+        }
+
+        for interface in &ast.interfaces {
+            walk_interface(&mut index_table, None, interface);
         }
 
         Self {

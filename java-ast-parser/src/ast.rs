@@ -1,9 +1,46 @@
 use bitflags::bitflags;
 use ownable::traits::IntoOwned;
 use std::cell::RefCell;
-use std::fmt::write;
 use std::ops::Deref;
 use std::rc::Rc;
+
+#[allow(clippy::mutable_key_type)]
+#[derive(Debug, Clone)]
+pub struct ObjectCell<T>(Rc<RefCell<T>>);
+
+impl<T> From<T> for ObjectCell<T> {
+    fn from(value: T) -> Self {
+        Self(Rc::new(RefCell::new(value)))
+    }
+}
+
+impl<T> From<Rc<RefCell<T>>> for ObjectCell<T> {
+    fn from(value: Rc<RefCell<T>>) -> Self {
+        Self(value)
+    }
+}
+
+impl<T> Deref for ObjectCell<T> {
+    type Target = RefCell<T>;
+
+    fn deref(&self) -> &Self::Target {
+        self.0.deref()
+    }
+}
+
+impl<T> std::hash::Hash for ObjectCell<T> {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        std::ptr::hash(self.0.deref().as_ptr(), state);
+    }
+}
+
+impl<T> std::cmp::PartialEq for ObjectCell<T> {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.as_ptr() == other.0.as_ptr()
+    }
+}
+
+impl<T> std::cmp::Eq for ObjectCell<T> {}
 
 bitflags! {
     #[derive(Debug, Clone, PartialEq)]
@@ -143,15 +180,16 @@ pub struct Function {
     // TODO: may be initialisers?
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub(super) enum ClassEntry {
-    Class(Class),
     Variables(Box<[Variable]>),
     Function(Function),
+    Class(Class),
+    Interface(Interface),
     Skip,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct Class {
     pub modifiers: Modifiers,
     pub ident: String,
@@ -161,8 +199,12 @@ pub struct Class {
 
     pub variables: Box<[Variable]>,
     pub functions: Box<[Function]>,
+
     pub classes: Box<[ClassCell]>,
+    pub interfaces: Box<[InterfaceCell]>,
 }
+
+pub type ClassCell = ObjectCell<Class>;
 
 // impl std::fmt::Debug for Class {
 //     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -190,15 +232,17 @@ impl
     ) -> Self {
         let (modifiers, ident, extends, implements, entries) = value;
 
-        let mut classes = Vec::new();
         let mut variables = Vec::new();
         let mut functions = Vec::new();
+        let mut classes = Vec::new();
+        let mut interfaces = Vec::new();
 
         for entry in entries {
             match entry {
-                ClassEntry::Class(c) => classes.push(c),
                 ClassEntry::Variables(v) => variables.append(&mut v.into_vec()),
                 ClassEntry::Function(f) => functions.push(f),
+                ClassEntry::Class(c) => classes.push(c),
+                ClassEntry::Interface(i) => interfaces.push(i),
                 ClassEntry::Skip => {}
             }
         }
@@ -210,51 +254,101 @@ impl
             implements: implements.unwrap_or(Box::from([])),
             variables: variables.into_boxed_slice(),
             functions: functions.into_boxed_slice(),
-            classes: classes
-                .into_iter()
-                .map(|x| Rc::from(RefCell::from(x)).into())
-                .collect::<Box<_>>(),
+            classes: classes.into_iter().map(ClassCell::from).collect(),
+            interfaces: interfaces.into_iter().map(InterfaceCell::from).collect(),
         }
     }
 }
 
-#[allow(clippy::mutable_key_type)]
 #[derive(Debug, Clone)]
-pub struct ClassCell(Rc<RefCell<Class>>);
+pub(super) enum InterfaceEntry {
+    Variables(Box<[Variable]>),
+    Function(Function),
+    Class(Class),
+    Interface(Interface),
+}
 
-impl From<Rc<RefCell<Class>>> for ClassCell {
-    fn from(value: Rc<RefCell<Class>>) -> Self {
-        Self(value)
+#[derive(Debug, Clone, PartialEq)]
+pub struct Interface {
+    pub modifiers: Modifiers,
+    pub ident: String,
+
+    pub extends: Box<[Type]>,
+
+    pub variables: Box<[Variable]>,
+    pub functions: Box<[Function]>,
+
+    pub classes: Box<[ClassCell]>,
+    pub interfaces: Box<[InterfaceCell]>,
+}
+
+pub type InterfaceCell = ObjectCell<Interface>;
+
+impl From<(Modifiers, &str, Option<Box<[Type]>>, Vec<InterfaceEntry>)> for Interface {
+    fn from(value: (Modifiers, &str, Option<Box<[Type]>>, Vec<InterfaceEntry>)) -> Self {
+        let (modifiers, ident, extends, entries) = value;
+
+        let mut variables = Vec::new();
+        let mut functions = Vec::new();
+        let mut classes = Vec::new();
+        let mut interfaces = Vec::new();
+
+        for entry in entries {
+            match entry {
+                InterfaceEntry::Variables(v) => variables.extend_from_slice(&v),
+                InterfaceEntry::Function(f) => functions.push(f),
+                InterfaceEntry::Class(c) => classes.push(c),
+                InterfaceEntry::Interface(i) => interfaces.push(i),
+            }
+        }
+
+        Self {
+            modifiers,
+            ident: ident.to_string(),
+            extends: extends.unwrap_or(Box::new([])),
+            variables: variables.into_boxed_slice(),
+            functions: functions.into_boxed_slice(),
+            classes: classes.into_iter().map(ClassCell::from).collect(),
+            interfaces: interfaces.into_iter().map(InterfaceCell::from).collect(),
+        }
     }
 }
 
-impl Deref for ClassCell {
-    type Target = RefCell<Class>;
-
-    fn deref(&self) -> &Self::Target {
-        self.0.deref()
-    }
+#[derive(Debug, Clone)]
+pub(super) enum RootEntry {
+    Class(Class),
+    Interface(Interface),
 }
-
-impl std::hash::Hash for ClassCell {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        std::ptr::hash(self.0.deref().as_ptr(), state);
-    }
-}
-
-impl std::cmp::PartialEq for ClassCell {
-    fn eq(&self, other: &Self) -> bool {
-        self.0.as_ptr() == other.0.as_ptr()
-    }
-}
-
-impl std::cmp::Eq for ClassCell {}
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Root {
     pub package: String,
     pub imports: Box<[String]>,
     pub classes: Box<[ClassCell]>,
+    pub interfaces: Box<[InterfaceCell]>,
+}
+
+impl From<(&str, Vec<&str>, Vec<RootEntry>)> for Root {
+    fn from(value: (&str, Vec<&str>, Vec<RootEntry>)) -> Self {
+        let (package, imports, entries) = value;
+
+        let mut classes = Vec::new();
+        let mut interfaces = Vec::new();
+
+        for entry in entries {
+            match entry {
+                RootEntry::Class(c) => classes.push(c),
+                RootEntry::Interface(i) => interfaces.push(i),
+            }
+        }
+
+        Self {
+            package: package.to_string(),
+            imports: imports.into_iter().map(String::from).collect(),
+            classes: classes.into_iter().map(ClassCell::from).collect(),
+            interfaces: interfaces.into_iter().map(InterfaceCell::from).collect(),
+        }
+    }
 }
 
 impl std::hash::Hash for Root {
@@ -262,5 +356,3 @@ impl std::hash::Hash for Root {
         std::ptr::hash(self, state);
     }
 }
-
-impl std::cmp::Eq for Root {}
