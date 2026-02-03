@@ -168,7 +168,7 @@ pub enum Token<'a> {
     Boolean(bool),
 
     #[regex(r"-?[0-9]+", |lex| lex.slice().parse())]
-    #[regex(r"0x[0-9a-fA-F]{1,16}", |lex| i64::from_str_radix(&lex.slice()[2..], 16))]
+    #[regex(r"0x[0-9a-fA-F]{1,16}", |lex| u64::from_str_radix(&lex.slice()[2..], 16).map(|x| x as i64))]
     Integer(i64),
 
     #[token("abstract")]
