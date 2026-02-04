@@ -167,8 +167,14 @@ GenericDefinitions: Box<[ast::GenericDefinition]>
   = "<" <g:CommaList<GenericDefinition>> ">"
   => g;
 
+#[inline]
+FunctionArgumentIdent: Cow<'input, str> = {
+  Ident => <>,
+  "this" => Cow::from("this"),
+};
 FunctionArgument: ast::FunctionArgument
   = <m:Modifiers> <t:Type> <v:"..."?> <i:Ident>
+  = <m:Modifiers> <t:Type> <v:"..."?> <i:FunctionArgumentIdent>
   => ast::FunctionArgument {
     modifiers: m,
     r#type: t,
