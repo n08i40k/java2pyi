@@ -230,7 +230,7 @@ ClassEntry: ast::ClassEntry = {
   <c:Class> => ast::ClassEntry::Class(c),
   <e:Enum> => ast::ClassEntry::Enum(e),
   <i:Interface> => ast::ClassEntry::Interface(i),
-  "static" "{" "}" => ast::ClassEntry::Skip,
+  "static"? "{" "}" => ast::ClassEntry::Skip,
 };
 
 #[inline]
@@ -250,7 +250,7 @@ EnumEntry: ast::EnumEntry = {
   <c:Class> => ast::EnumEntry::Class(c),
   <e:Enum> => ast::EnumEntry::Enum(e),
   <i:Interface> => ast::EnumEntry::Interface(i),
-  "static" "{" "}" => ast::EnumEntry::Skip,
+  "static"? "{" "}" => ast::EnumEntry::Skip,
 };
 
 #[inline]
