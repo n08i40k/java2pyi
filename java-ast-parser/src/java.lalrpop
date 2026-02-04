@@ -96,7 +96,8 @@ Path: Cow<'input, str> = <l:@L> Ident ("." Ident)* <r:@R> => Cow::from(&input[l.
 CommaList<T>: Box<[T]> = <first:T> <mut rest:("," <T>)*> => { rest.insert(0, first); rest.into_boxed_slice() };
 TrailingCommaList<T>: Box<[T]> = <first:T> <mut rest:("," <T>)*> "," => { rest.insert(0, first); rest.into_boxed_slice() };
 
-#[inline]
+OptionalSemicolonList<T>: Box<[T]> = <first:T> ";"* <mut rest:(<T> ";"*)*> => { rest.insert(0, first); rest.into_boxed_slice() };
+
 MayBeTrailingCommaList<T>: Box<[T]> = {
   <CommaList<T>> => <>,
   <TrailingCommaList<T>> => <>,
@@ -194,7 +195,7 @@ FunctionArgument: ast::FunctionArgument
   };
 
 #[inline]
-FunctionEnd: () = { "{" "}" ";", "{" "}", ";" };
+FunctionEnd: () = { "{" "}", ";" };
 
 Function: ast::Function
   = <m:Modifiers> <g:GenericDefinitions?> <rt:QualifiedType> <i:Ident?> "(" <args:CommaList<FunctionArgument>?> ")" ("throws" CommaList<QualifiedType>)? FunctionEnd
@@ -218,7 +219,7 @@ InterfaceEntry: ast::InterfaceEntry = {
 InterfaceExtends: Box<[ast::QualifiedType]> = "extends" <t:CommaList<QualifiedType>> => t;
 
 Interface: ast::Interface
-  = <m:Modifiers> "interface" <i:Ident> <g:GenericDefinitions?> <ex:InterfaceExtends?> "{" <e:InterfaceEntry*> "}" ";"?
+  = <m:Modifiers> "interface" <i:Ident> <g:GenericDefinitions?> <ex:InterfaceExtends?> "{" <e:OptionalSemicolonList<InterfaceEntry>?> "}"
   => ast::Interface::from((m, i, g, ex, e));
 
 #[inline]
@@ -237,7 +238,7 @@ ClassEntry: ast::ClassEntry = {
 ClassExtends: ast::QualifiedType = "extends" <t:QualifiedType> => t;
 
 Class: ast::Class
-  = <m:Modifiers> "class" <i:Ident> <g:GenericDefinitions?> <ex:ClassExtends?> <im:ObjectImplements?> "{" <en:ClassEntry*> "}" ";"?
+  = <m:Modifiers> "class" <i:Ident> <g:GenericDefinitions?> <ex:ClassExtends?> <im:ObjectImplements?> "{" <en:OptionalSemicolonList<ClassEntry>?> "}"
   => ast::Class::from((m, i, g, ex, im, en));
 
 #[inline]
@@ -256,11 +257,11 @@ EnumEntry: ast::EnumEntry = {
 #[inline]
 EnumBody: Box<[ast::EnumEntry]> = {
   MayBeTrailingCommaList<EnumVariant> ";"?             => Box::from([]),
-  MayBeTrailingCommaList<EnumVariant> ";" <EnumEntry+> => <>.into_boxed_slice(),
+  MayBeTrailingCommaList<EnumVariant> ";" <OptionalSemicolonList<EnumEntry>> => <>,
 };
 
 Enum: ast::Enum
-  = <m:Modifiers> "enum" <i:Ident> <g:GenericDefinitions?> <im:ObjectImplements?> "{" <b:EnumBody?> "}" ";"?
+  = <m:Modifiers> "enum" <i:Ident> <g:GenericDefinitions?> <im:ObjectImplements?> "{" <b:EnumBody?> "}"
   => ast::Enum::from((m, i, g, im, b));
 
 RootEntry: ast::RootEntry = {
@@ -270,5 +271,5 @@ RootEntry: ast::RootEntry = {
 };
 
 pub Root: ast::Root
-  = <p:Package> <i:Import*> <e:RootEntry*>
+  = <p:Package> <i:Import*> <e:OptionalSemicolonList<RootEntry>?>
   => ast::Root::from((p, i, e));

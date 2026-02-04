@@ -233,7 +233,7 @@ impl
         Option<Box<[GenericDefinition]>>,
         Option<QualifiedType>,
         Option<Box<[QualifiedType]>>,
-        Vec<ClassEntry>,
+        Option<Box<[ClassEntry]>>,
     )> for Class
 {
     fn from(
@@ -243,7 +243,7 @@ impl
             Option<Box<[GenericDefinition]>>,
             Option<QualifiedType>,
             Option<Box<[QualifiedType]>>,
-            Vec<ClassEntry>,
+            Option<Box<[ClassEntry]>>,
         ),
     ) -> Self {
         let (modifiers, ident, generics, extends, implements, entries) = value;
@@ -254,14 +254,16 @@ impl
         let mut enums = Vec::new();
         let mut interfaces = Vec::new();
 
-        for entry in entries {
-            match entry {
-                ClassEntry::Variables(v) => variables.append(&mut v.into_vec()),
-                ClassEntry::Function(f) => functions.push(f),
-                ClassEntry::Class(c) => classes.push(c),
-                ClassEntry::Enum(e) => enums.push(e),
-                ClassEntry::Interface(i) => interfaces.push(i),
-                ClassEntry::Skip => {}
+        if let Some(entries) = entries {
+            for entry in entries {
+                match entry {
+                    ClassEntry::Variables(v) => variables.append(&mut v.into_vec()),
+                    ClassEntry::Function(f) => functions.push(f),
+                    ClassEntry::Class(c) => classes.push(c),
+                    ClassEntry::Enum(e) => enums.push(e),
+                    ClassEntry::Interface(i) => interfaces.push(i),
+                    ClassEntry::Skip => {}
+                }
             }
         }
 
@@ -400,7 +402,7 @@ impl
         Cow<'_, str>,
         Option<Box<[GenericDefinition]>>,
         Option<Box<[QualifiedType]>>,
-        Vec<InterfaceEntry>,
+        Option<Box<[InterfaceEntry]>>,
     )> for Interface
 {
     fn from(
@@ -409,7 +411,7 @@ impl
             Cow<'_, str>,
             Option<Box<[GenericDefinition]>>,
             Option<Box<[QualifiedType]>>,
-            Vec<InterfaceEntry>,
+            Option<Box<[InterfaceEntry]>>,
         ),
     ) -> Self {
         let (modifiers, ident, generics, extends, entries) = value;
@@ -420,13 +422,15 @@ impl
         let mut enums = Vec::new();
         let mut interfaces = Vec::new();
 
-        for entry in entries {
-            match entry {
-                InterfaceEntry::Variables(v) => variables.extend_from_slice(&v),
-                InterfaceEntry::Function(f) => functions.push(f),
-                InterfaceEntry::Class(c) => classes.push(c),
-                InterfaceEntry::Enum(e) => enums.push(e),
-                InterfaceEntry::Interface(i) => interfaces.push(i),
+        if let Some(entries) = entries {
+            for entry in entries {
+                match entry {
+                    InterfaceEntry::Variables(v) => variables.extend_from_slice(&v),
+                    InterfaceEntry::Function(f) => functions.push(f),
+                    InterfaceEntry::Class(c) => classes.push(c),
+                    InterfaceEntry::Enum(e) => enums.push(e),
+                    InterfaceEntry::Interface(i) => interfaces.push(i),
+                }
             }
         }
 
@@ -460,19 +464,21 @@ pub struct Root {
     pub interfaces: Box<[InterfaceCell]>,
 }
 
-impl From<(Cow<'_, str>, Vec<Cow<'_, str>>, Vec<RootEntry>)> for Root {
-    fn from(value: (Cow<'_, str>, Vec<Cow<'_, str>>, Vec<RootEntry>)) -> Self {
+impl From<(Cow<'_, str>, Vec<Cow<'_, str>>, Option<Box<[RootEntry]>>)> for Root {
+    fn from(value: (Cow<'_, str>, Vec<Cow<'_, str>>, Option<Box<[RootEntry]>>)) -> Self {
         let (package, imports, entries) = value;
 
         let mut classes = Vec::new();
         let mut enums = Vec::new();
         let mut interfaces = Vec::new();
 
-        for entry in entries {
-            match entry {
-                RootEntry::Class(c) => classes.push(c),
-                RootEntry::Enum(e) => enums.push(e),
-                RootEntry::Interface(i) => interfaces.push(i),
+        if let Some(entries) = entries {
+            for entry in entries {
+                match entry {
+                    RootEntry::Class(c) => classes.push(c),
+                    RootEntry::Enum(e) => enums.push(e),
+                    RootEntry::Interface(i) => interfaces.push(i),
+                }
             }
         }
 
