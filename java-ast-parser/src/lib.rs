@@ -165,8 +165,12 @@ impl<'a> std::fmt::Display for ErrorCell<'a> {
                 match &error.kind {
                     lexer::LexicalErrorKind::InvalidToken => write!(
                         f,
-                        "Invalid token from {}:{} to {}:{}",
-                        start.row, start.column, end.row, end.column
+                        "Invalid token '{}' from {}:{} to {}:{}",
+                        &self.owner[error.span.start..error.span.end],
+                        start.row,
+                        start.column,
+                        end.row,
+                        end.column
                     )?,
                     lexer::LexicalErrorKind::InvalidInteger(parse_int_error) => write!(
                         f,
