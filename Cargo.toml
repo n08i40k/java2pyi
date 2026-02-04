@@ -8,7 +8,6 @@ edition = "2024"
 
 [dependencies]
 java-ast-parser = { path = "./java-ast-parser/" }
-lalrpop-util = "*"
-itertools = "*"
-topo_sort = "*"
-bimap = "*"
+lalrpop-util = "0.22.2"
+topo_sort = "0.4.0"
+orx-tree = "2.2.0"

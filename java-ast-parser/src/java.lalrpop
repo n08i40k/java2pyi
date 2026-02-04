@@ -93,6 +93,10 @@ extern {
 #[inline]
 Path: Cow<'input, str> = <l:@L> Ident ("." Ident)* <r:@R> => Cow::from(&input[l..r]);
 
+CommaList<T>: Box<[T]> = <first:T> <mut rest:("," <T>)*> => { rest.insert(0, first); rest.into_boxed_slice() };
+AmpersandList<T>: Box<[T]> = <first:T> <mut rest:("&" <T>)*> => { rest.insert(0, first); rest.into_boxed_slice() };
+PeriodList<T>: Box<[T]> = <first:T> <mut rest:("." <T>)*> => { rest.insert(0, first); rest.into_boxed_slice() };
+
 Package: Cow<'input, str> = "package" <p:Path> ";" => p;
 
 #[inline]
@@ -116,9 +120,6 @@ Modifier: ast::Modifiers = {
 
 Modifiers: ast::Modifiers = <mods:Modifier*> => mods.into_iter().reduce(|a, b| a | b).unwrap_or(ast::Modifiers::empty());
 
-CommaList<T>: Box<[T]> = <first:T> <mut rest:("," <T>)*> => { rest.insert(0, first); rest.into_boxed_slice() };
-AmpersandList<T>: Box<[T]> = <first:T> <mut rest:("&" <T>)*> => { rest.insert(0, first); rest.into_boxed_slice() };
-
 TypeName: ast::TypeName = {
   "void" => ast::TypeName::Void,
   "boolean" => ast::TypeName::Boolean,
@@ -128,14 +129,14 @@ TypeName: ast::TypeName = {
   "long" => ast::TypeName::Long,
   "float" => ast::TypeName::Float,
   "double" => ast::TypeName::Double,
-  <i:Path> => ast::TypeName::Ident(i.to_string()),
+  <i:Ident> => ast::TypeName::Ident(i.to_string()),
 };
 
 TypeGeneric: ast::TypeGeneric = {
-  <t:Type>                => ast::TypeGeneric::Type(t),
-  "?"                     => ast::TypeGeneric::Wildcard(ast::WildcardBoundary::None),
-  "?" "extends" <t:Type>  => ast::TypeGeneric::Wildcard(ast::WildcardBoundary::Extends(t)),
-  "?" "super" <t:Type>    => ast::TypeGeneric::Wildcard(ast::WildcardBoundary::Super(t)),
+  <t:QualifiedType>               => ast::TypeGeneric::Type(t),
+  "?"                             => ast::TypeGeneric::Wildcard(ast::WildcardBoundary::None),
+  "?" "extends" <t:QualifiedType> => ast::TypeGeneric::Wildcard(ast::WildcardBoundary::Extends(t)),
+  "?" "super" <t:QualifiedType>   => ast::TypeGeneric::Wildcard(ast::WildcardBoundary::Super(t)),
 };
 
 TypeGenerics: Box<[ast::TypeGeneric]> = "<" <l:CommaList<TypeGeneric>?> ">" => l.unwrap_or(Box::from([]));
@@ -152,12 +153,13 @@ Type: ast::Type = {
   <t:ArrayType> => t,
 };
 
+QualifiedType: ast::QualifiedType = PeriodList<Type> => <>;
 
 Variables: Box<[ast::Variable]> 
-  = <m:Modifiers> <t:Type> <i:CommaList<Ident>> ";" 
+  = <m:Modifiers> <t:QualifiedType> <i:CommaList<Ident>> ";" 
   => ast::Variable::new_array(m, t, i);
 
-GenericDefinitionsExtends: Box<[ast::Type]> = "extends" <e:AmpersandList<Type>> => e;
+GenericDefinitionsExtends: Box<[ast::QualifiedType]> = "extends" <e:AmpersandList<QualifiedType>> => e;
 
 GenericDefinition: ast::GenericDefinition
   = <i:Ident> <e:GenericDefinitionsExtends?>
@@ -172,9 +174,9 @@ FunctionArgumentIdent: Cow<'input, str> = {
   Ident => <>,
   "this" => Cow::from("this"),
 };
+
 FunctionArgument: ast::FunctionArgument
-  = <m:Modifiers> <t:Type> <v:"..."?> <i:Ident>
-  = <m:Modifiers> <t:Type> <v:"..."?> <i:FunctionArgumentIdent>
+  = <m:Modifiers> <t:QualifiedType> <v:"..."?> <i:FunctionArgumentIdent>
   => ast::FunctionArgument {
     modifiers: m,
     r#type: t,
@@ -186,7 +188,7 @@ FunctionArgument: ast::FunctionArgument
 FunctionEnd: () = { "{" "}", ";" };
 
 Function: ast::Function
-  = <m:Modifiers> <g:GenericDefinitions?> <rt:Type> <i:Ident?> "(" <args:CommaList<FunctionArgument>?> ")" ("throws" CommaList<Type>)? FunctionEnd
+  = <m:Modifiers> <g:GenericDefinitions?> <rt:QualifiedType> <i:Ident?> "(" <args:CommaList<FunctionArgument>?> ")" ("throws" CommaList<QualifiedType>)? FunctionEnd
   => ast::Function {
     modifiers: m,
     generics: g.unwrap_or(Box::from([])),
@@ -203,7 +205,7 @@ InterfaceEntry: ast::InterfaceEntry = {
 };
 
 #[inline]
-InterfaceExtends: Box<[ast::Type]> = "extends" <t:CommaList<Type>> => t;
+InterfaceExtends: Box<[ast::QualifiedType]> = "extends" <t:CommaList<QualifiedType>> => t;
 
 Interface: ast::Interface
   = <m:Modifiers> "interface" <i:Ident> <g:GenericDefinitions?> <ex:InterfaceExtends?> "{" <e:InterfaceEntry*> "}"
@@ -217,10 +219,10 @@ ClassEntry: ast::ClassEntry = {
   "static" "{" "}" => ast::ClassEntry::Skip,
 };
 
-ClassImplements: Box<[ast::Type]> = "implements" <l:CommaList<Type>> => l;
+ClassImplements: Box<[ast::QualifiedType]> = "implements" <l:CommaList<QualifiedType>> => l;
 
 #[inline]
-ClassExtends: ast::Type = "extends" <t:Type> => t;
+ClassExtends: ast::QualifiedType = "extends" <t:QualifiedType> => t;
 
 Class: ast::Class
   = <m:Modifiers> "class" <i:Ident> <g:GenericDefinitions?> <ex:ClassExtends?> <im:ClassImplements?> "{" <en:ClassEntry*> "}" ";"?

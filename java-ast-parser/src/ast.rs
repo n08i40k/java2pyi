@@ -83,7 +83,7 @@ pub enum TypeName {
     Float,
     Double,
     Ident(String),
-    ResolvedIdent(ClassCell),
+    ResolvedClass(ClassCell),
 }
 
 impl std::fmt::Debug for TypeName {
@@ -98,7 +98,7 @@ impl std::fmt::Debug for TypeName {
             Self::Float => write!(f, "Float"),
             Self::Double => write!(f, "Double"),
             Self::Ident(arg0) => f.debug_tuple("Ident").field(arg0).finish(),
-            Self::ResolvedIdent(arg0) => f
+            Self::ResolvedClass(arg0) => f
                 .debug_tuple("ResolvedIdent")
                 .field(&arg0.borrow().ident)
                 .finish(),
@@ -107,8 +107,8 @@ impl std::fmt::Debug for TypeName {
 }
 
 impl TypeName {
-    pub fn resolved_ident(&self) -> Option<&ClassCell> {
-        if let Self::ResolvedIdent(class_cell) = self {
+    pub fn resolved_class(&self) -> Option<&ClassCell> {
+        if let Self::ResolvedClass(class_cell) = self {
             Some(class_cell)
         } else {
             None
@@ -119,13 +119,13 @@ impl TypeName {
 #[derive(Debug, Clone, PartialEq)]
 pub enum WildcardBoundary {
     None,
-    Extends(Type),
-    Super(Type),
+    Extends(QualifiedType),
+    Super(QualifiedType),
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum TypeGeneric {
-    Type(Type),
+    Type(QualifiedType),
     Wildcard(WildcardBoundary),
 }
 
@@ -136,10 +136,12 @@ pub struct Type {
     pub array: bool,
 }
 
+pub type QualifiedType = Box<[Type]>;
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Variable {
     pub modifiers: Modifiers,
-    pub r#type: Type,
+    pub r#type: QualifiedType,
     pub ident: String,
     // TODO: may be initialisers?
 }
@@ -147,7 +149,7 @@ pub struct Variable {
 impl Variable {
     pub fn new_array(
         modifiers: Modifiers,
-        r#type: Type,
+        r#type: QualifiedType,
         idents: Box<[Cow<'_, str>]>,
     ) -> Box<[Self]> {
         idents
@@ -164,13 +166,13 @@ impl Variable {
 #[derive(Debug, Clone, PartialEq)]
 pub struct GenericDefinition {
     pub ident: String,
-    pub extends: Box<[Type]>,
+    pub extends: Box<[QualifiedType]>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct FunctionArgument {
     pub modifiers: Modifiers,
-    pub r#type: Type,
+    pub r#type: QualifiedType,
     pub ident: String,
     pub vararg: bool,
 }
@@ -179,7 +181,7 @@ pub struct FunctionArgument {
 pub struct Function {
     pub modifiers: Modifiers,
     pub generics: Box<[GenericDefinition]>,
-    pub return_type: Type,
+    pub return_type: QualifiedType,
     pub ident: String,
     pub arguments: Box<[FunctionArgument]>,
     // TODO: may be initialisers?
@@ -200,8 +202,8 @@ pub struct Class {
     pub ident: String,
     pub generics: Box<[GenericDefinition]>,
 
-    pub extends: Option<Type>,
-    pub implements: Box<[Type]>,
+    pub extends: Option<QualifiedType>,
+    pub implements: Box<[QualifiedType]>,
 
     pub variables: Box<[Variable]>,
     pub functions: Box<[Function]>,
@@ -223,8 +225,8 @@ impl
         Modifiers,
         Cow<'_, str>,
         Option<Box<[GenericDefinition]>>,
-        Option<Type>,
-        Option<Box<[Type]>>,
+        Option<QualifiedType>,
+        Option<Box<[QualifiedType]>>,
         Vec<ClassEntry>,
     )> for Class
 {
@@ -233,8 +235,8 @@ impl
             Modifiers,
             Cow<'_, str>,
             Option<Box<[GenericDefinition]>>,
-            Option<Type>,
-            Option<Box<[Type]>>,
+            Option<QualifiedType>,
+            Option<Box<[QualifiedType]>>,
             Vec<ClassEntry>,
         ),
     ) -> Self {
@@ -283,7 +285,7 @@ pub struct Interface {
     pub ident: String,
     pub generics: Box<[GenericDefinition]>,
 
-    pub extends: Box<[Type]>,
+    pub extends: Box<[QualifiedType]>,
 
     pub variables: Box<[Variable]>,
     pub functions: Box<[Function]>,
@@ -299,7 +301,7 @@ impl
         Modifiers,
         Cow<'_, str>,
         Option<Box<[GenericDefinition]>>,
-        Option<Box<[Type]>>,
+        Option<Box<[QualifiedType]>>,
         Vec<InterfaceEntry>,
     )> for Interface
 {
@@ -308,7 +310,7 @@ impl
             Modifiers,
             Cow<'_, str>,
             Option<Box<[GenericDefinition]>>,
-            Option<Box<[Type]>>,
+            Option<Box<[QualifiedType]>>,
             Vec<InterfaceEntry>,
         ),
     ) -> Self {

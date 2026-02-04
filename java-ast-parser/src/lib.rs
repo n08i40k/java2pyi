@@ -1,7 +1,6 @@
-use std::{borrow::Cow, marker::PhantomData};
-
 use lalrpop_util::lalrpop_mod;
 use ownable::{IntoOwned, traits::IntoOwned};
+use std::borrow::Cow;
 
 use crate::lexer::{LexicalError, Token};
 

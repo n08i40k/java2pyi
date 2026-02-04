@@ -1,17 +1,9 @@
-use std::{
-    collections::HashMap,
-    fs,
-    ops::{Deref, DerefMut},
-    path::Path,
-    rc::Rc,
-};
+use std::{collections::HashMap, fs, ops::Deref, path::Path, rc::Rc};
 
-use java_ast_parser::ast::{self, ClassCell, InterfaceCell, Modifiers};
+use java_ast_parser::ast::{self, ClassCell, InterfaceCell};
 use topo_sort::{SortResults, TopoSort};
 
-use crate::index_table::{
-    GlobalIndexTable, ImportedIndexTable, LocalIndexTable, QualifiedIndexTable,
-};
+use crate::index_tree::{GlobalIndexTree, ImportedIndexTree, LocalIndexTree, PackageIndexTree};
 
 /// Parse ast and convert it to owned ("disconnect" from string).
 pub fn parse_java_ast<P: AsRef<Path>>(
@@ -22,113 +14,40 @@ pub fn parse_java_ast<P: AsRef<Path>>(
     java_ast_parser::parse(&data).map_err(|x| Box::new(x.into_owned()))
 }
 
-/// ClassPtr -> Local Scope
-/// # Examples:
-/// ru.n08i40k.MyClass -> None
-/// ru.n08i40k.MyClass.InnerClass -> Some("MyClass")
-fn build_local_scope_map(ast: &ast::Root) -> HashMap<ClassCell, String> {
-    let mut scope_map: HashMap<ClassCell, String> = HashMap::new();
-
-    fn walk_interface(
-        scope_map: &mut HashMap<ClassCell, String>,
-        scope: Option<&str>,
-        interface_cell: &InterfaceCell,
-    ) {
-        let interface = interface_cell.borrow();
-
-        let scope = if let Some(parent) = scope {
-            format!("{}.{}", parent, &interface.ident)
-        } else {
-            interface.ident.to_string()
-        };
-
-        for class_cell in &interface.classes {
-            walk_class(scope_map, Some(&scope), class_cell);
-        }
-
-        for interface_cell in &interface.interfaces {
-            walk_interface(scope_map, Some(&scope), interface_cell);
-        }
-    }
-
-    fn walk_class(
-        scope_map: &mut HashMap<ClassCell, String>,
-        scope: Option<&str>,
-        class_cell: &ClassCell,
-    ) {
-        let class = class_cell.borrow();
-
-        if let Some(scope) = &scope {
-            scope_map.insert(class_cell.clone(), scope.to_string());
-        }
-
-        let scope = if let Some(parent) = scope {
-            format!("{}.{}", parent, &class.ident)
-        } else {
-            class.ident.to_string()
-        };
-
-        for class_cell in &class.classes {
-            walk_class(scope_map, Some(&scope), class_cell);
-        }
-
-        for interface_cell in &class.interfaces {
-            walk_interface(scope_map, Some(&scope), interface_cell);
-        }
-    }
-
-    for interface_cell in &ast.interfaces {
-        walk_interface(&mut scope_map, None, interface_cell);
-    }
-
-    for class_cell in &ast.classes {
-        walk_class(&mut scope_map, None, class_cell);
-    }
-
-    scope_map
-}
-
-fn resolve_type_name(
-    type_name: &mut ast::TypeName,
-    scope: Option<&str>,
-    local_index_table: &LocalIndexTable,
+fn resolve_qualified_type(
+    r#type: &mut ast::QualifiedType,
+    scope: &ClassCell,
+    local_index_tree: &LocalIndexTree,
 ) {
-    let ast::TypeName::Ident(ident) = type_name else {
+    let Some(type_cell) = local_index_tree.search(Some(scope), r#type) else {
         return;
     };
 
-    let Some(type_cell) = local_index_table.search(scope, ident) else {
-        return;
-    };
-
-    *type_name = ast::TypeName::ResolvedIdent(type_cell.clone());
+    r#type.last_mut().unwrap().name = ast::TypeName::ResolvedClass(type_cell.clone());
 }
 
 /// ChildPtr -> ParentPtr
-fn resolve_type_names<'a, T: IntoIterator<Item = &'a (ClassCell, &'a LocalIndexTable)>>(
-    scope_map: &HashMap<ClassCell, String>,
-    classes_with_tables: T,
+fn resolve_type_names<'a, T: IntoIterator<Item = &'a (ClassCell, &'a LocalIndexTree)>>(
+    iter: T,
 ) -> HashMap<ClassCell, ClassCell> {
     let extends_map: HashMap<ClassCell, ClassCell> = HashMap::new();
 
-    for (class_cell, local_index_table) in classes_with_tables {
-        let scope = scope_map.get(class_cell).map(|x| x.as_str());
-
+    for (class_cell, local_index_tree) in iter {
         let mut class = class_cell.borrow_mut();
 
         if let Some(extends) = &mut class.extends {
-            resolve_type_name(&mut extends.name, scope, local_index_table);
+            resolve_qualified_type(extends, class_cell, local_index_tree);
         }
 
         for variable in &mut class.variables {
-            resolve_type_name(&mut variable.r#type.name, scope, local_index_table);
+            resolve_qualified_type(&mut variable.r#type, class_cell, local_index_tree);
         }
 
         for function in &mut class.functions {
-            resolve_type_name(&mut function.return_type.name, scope, local_index_table);
+            resolve_qualified_type(&mut function.return_type, class_cell, local_index_tree);
 
             for argument in &mut function.arguments {
-                resolve_type_name(&mut argument.r#type.name, scope, local_index_table);
+                resolve_qualified_type(&mut argument.r#type, class_cell, local_index_tree);
             }
         }
     }
@@ -138,46 +57,46 @@ fn resolve_type_names<'a, T: IntoIterator<Item = &'a (ClassCell, &'a LocalIndexT
 
 fn collect_scoped_classes<'a, T: IntoIterator<Item = &'a Scope>>(
     scopes: T,
-) -> Box<[(ClassCell, &'a LocalIndexTable)]> {
-    let mut classes: Vec<(ClassCell, &'a LocalIndexTable)> = Vec::new();
+) -> Box<[(ClassCell, &'a LocalIndexTree)]> {
+    let mut classes: Vec<(ClassCell, &'a LocalIndexTree)> = Vec::new();
 
     fn walk_interface<'a>(
-        classes: &mut Vec<(ClassCell, &'a LocalIndexTable)>,
-        local_index_table: &'a LocalIndexTable,
+        classes: &mut Vec<(ClassCell, &'a LocalIndexTree)>,
+        local_index_tree: &'a LocalIndexTree,
         interface_cell: &InterfaceCell,
     ) {
         for class in &interface_cell.borrow().classes {
-            walk_class(classes, local_index_table, class);
+            walk_class(classes, local_index_tree, class);
         }
 
         for interface in &interface_cell.borrow().interfaces {
-            walk_interface(classes, local_index_table, interface);
+            walk_interface(classes, local_index_tree, interface);
         }
     }
 
     fn walk_class<'a>(
-        classes: &mut Vec<(ClassCell, &'a LocalIndexTable)>,
-        local_index_table: &'a LocalIndexTable,
+        classes: &mut Vec<(ClassCell, &'a LocalIndexTree)>,
+        local_index_tree: &'a LocalIndexTree,
         class_cell: &ClassCell,
     ) {
-        classes.push((class_cell.clone(), local_index_table));
+        classes.push((class_cell.clone(), local_index_tree));
 
         for class in &class_cell.borrow().classes {
-            walk_class(classes, local_index_table, class);
+            walk_class(classes, local_index_tree, class);
         }
 
         for interface in &class_cell.borrow().interfaces {
-            walk_interface(classes, local_index_table, interface);
+            walk_interface(classes, local_index_tree, interface);
         }
     }
 
     for scope in scopes {
         for interface in &scope.ast.interfaces {
-            walk_interface(&mut classes, &scope.local_index_table, interface);
+            walk_interface(&mut classes, &scope.local_index_tree, interface);
         }
 
         for class in &scope.ast.classes {
-            walk_class(&mut classes, &scope.local_index_table, class);
+            walk_class(&mut classes, &scope.local_index_tree, class);
         }
     }
 
@@ -222,13 +141,13 @@ fn strip_unknown_extends<'a, T: IntoIterator<Item = &'a ClassCell>>(
     for class_cell in classes_iter {
         let mut class = class_cell.borrow_mut();
 
-        match class.extends {
+        match &mut class.extends {
             None => continue,
-            Some(ast::Type {
-                name: ast::TypeName::ResolvedIdent(_),
-                ..
-            }) => continue,
-            _ => {}
+            Some(q) => {
+                if let ast::TypeName::ResolvedClass(_) = q.last().unwrap().name {
+                    continue;
+                }
+            }
         }
 
         class.extends = None;
@@ -242,10 +161,8 @@ fn topo_sort_extendables<'a, T: IntoIterator<Item = &'a ClassCell>>(
     let mut topo_sort = TopoSort::with_capacity(classes_iter_len);
 
     for class_cell in classes_iter {
-        if let Some(ast::Type {
-            name: ast::TypeName::ResolvedIdent(type_cell),
-            ..
-        }) = &class_cell.borrow().extends
+        if let Some(q) = &class_cell.borrow().extends
+            && let ast::TypeName::ResolvedClass(type_cell) = &q.last().unwrap().name
         {
             topo_sort.insert(class_cell.clone(), vec![type_cell.clone()]);
         }
@@ -260,74 +177,51 @@ fn topo_sort_extendables<'a, T: IntoIterator<Item = &'a ClassCell>>(
 
 pub struct Scope {
     pub ast: Rc<ast::Root>,
-    pub local_index_table: LocalIndexTable,
+    pub local_index_tree: LocalIndexTree,
 }
 
 impl Scope {
     pub fn from_roots(roots: &[Rc<ast::Root>]) -> Box<[Self]> {
-        let qualified_tables_by_root = {
-            let mut tables_by_root: HashMap<*const ast::Root, QualifiedIndexTable> = HashMap::new();
+        let package_index_trees = {
+            let package_index_trees = roots
+                .iter()
+                .map(|x| PackageIndexTree::from_ast(x))
+                .collect::<Box<[_]>>();
 
-            for root in roots.iter() {
-                tables_by_root.insert(
-                    root.deref() as *const ast::Root,
-                    QualifiedIndexTable::from_ast(root),
-                );
+            let mut groups: HashMap<String, PackageIndexTree> = HashMap::new();
+
+            for package_index_tree in package_index_trees {
+                if let Some(target_index_tree) = groups.get_mut(package_index_tree.package()) {
+                    target_index_tree.merge_with(&package_index_tree);
+                } else {
+                    groups.insert(package_index_tree.package().to_string(), package_index_tree);
+                }
             }
 
-            tables_by_root
+            groups
         };
 
-        let qualified_tables = qualified_tables_by_root.values().collect::<Box<_>>();
-
-        let global_index_table = Rc::new(GlobalIndexTable::from_iter(
-            qualified_tables_by_root.values(),
-        ));
+        let global_index_tree = Rc::new(GlobalIndexTree::from_iter(package_index_trees.values()));
 
         roots
             .iter()
             .map(|root| {
-                let imported_index_table = ImportedIndexTable::from_imports(
-                    root.imports
-                        .iter()
-                        .map(|x| x.as_str())
-                        .collect::<Box<[_]>>()
-                        .as_ref(),
-                    qualified_tables_by_root.values(),
+                let imported_index_tree = ImportedIndexTree::from_imports(
+                    root.imports.iter().map(|x| x.as_str()),
+                    &global_index_tree,
                 );
 
-                let qualified_index_table = qualified_tables
-                    .iter()
-                    .filter_map(|v| {
-                        if v.package != root.package {
-                            return None;
-                        }
+                let package_index_tree = package_index_trees.get(root.package.as_str()).unwrap();
 
-                        Some(v.idt.clone())
-                    })
-                    .reduce(|left, right| {
-                        let mut merged = HashMap::new();
-
-                        merged.extend(left);
-                        merged.extend(right);
-
-                        merged
-                    })
-                    .map(|merged_table| QualifiedIndexTable {
-                        package: root.package.clone(),
-                        idt: merged_table,
-                    })
-                    .unwrap();
-
-                let local_index_table = LocalIndexTable::new(
-                    global_index_table.clone(),
-                    imported_index_table,
-                    qualified_index_table,
+                let local_index_tree = LocalIndexTree::new(
+                    global_index_tree.clone(),
+                    imported_index_tree,
+                    Clone::clone(package_index_tree.deref()),
                 );
 
                 Scope {
                     ast: root.clone(),
-                    local_index_table,
+                    local_index_tree,
                 }
             })
             .collect::<Box<_>>()
@@ -342,24 +236,11 @@ pub enum Error {
 pub fn preprocess_asts(roots: &[Rc<ast::Root>], inherit_by_merge: bool) -> Result<(), Error> {
     let scopes = Scope::from_roots(roots);
 
-    let classes_with_tables = collect_scoped_classes(&scopes);
+    let scoped_classes = collect_scoped_classes(&scopes);
 
-    let scope_map = roots
-        .iter()
-        .map(|x| build_local_scope_map(x.deref()))
-        .reduce(|left, right| {
-            let mut merged = HashMap::new();
+    let extends_map = resolve_type_names(&scoped_classes);
 
-            merged.extend(left);
-            merged.extend(right);
-
-            merged
-        })
-        .unwrap_or(HashMap::new());
-
-    let extends_map = resolve_type_names(&scope_map, &classes_with_tables);
-
-    let classes = classes_with_tables
+    let classes = scoped_classes
         .into_iter()
         .map(|(x, _)| x)
         .collect::<Box<_>>();
