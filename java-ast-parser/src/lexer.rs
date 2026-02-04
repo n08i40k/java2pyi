@@ -293,8 +293,13 @@ pub enum Token<'a> {
     #[token("double")]
     TypeDouble,
 
-    #[regex(r#"'((?:[^'\n]|(?:\\\'))*)'"#, string_from_lexer)]
-    #[regex(r#""((?:[^"\n]|(?:\\\"))*)""#, string_from_lexer)]
+    #[regex(
+        r#"'(?:\\u[0-9a-fA-F]{4}|\\[0-7]{1,3}|\\[btnfr"'\\]|[^'\\\r\n])'"#,
+        string_from_lexer
+    )]
+    CharLiteral(Cow<'a, str>),
+
+    #[regex(r#""([^"\\]*(?:\\.[^"\\]*)*)""#, string_from_lexer)]
     String(Cow<'a, str>),
 
     #[regex(r"[a-zA-Z_][a-zA-Z_0-9]*", |x| Cow::from(x.slice()), priority = 0)]
