@@ -194,7 +194,7 @@ FunctionArgument: ast::FunctionArgument
   };
 
 #[inline]
-FunctionEnd: () = { "{" "}", ";" };
+FunctionEnd: () = { "{" "}" ";", "{" "}", ";" };
 
 Function: ast::Function
   = <m:Modifiers> <g:GenericDefinitions?> <rt:QualifiedType> <i:Ident?> "(" <args:CommaList<FunctionArgument>?> ")" ("throws" CommaList<QualifiedType>)? FunctionEnd
@@ -218,7 +218,7 @@ InterfaceEntry: ast::InterfaceEntry = {
 InterfaceExtends: Box<[ast::QualifiedType]> = "extends" <t:CommaList<QualifiedType>> => t;
 
 Interface: ast::Interface
-  = <m:Modifiers> "interface" <i:Ident> <g:GenericDefinitions?> <ex:InterfaceExtends?> "{" <e:InterfaceEntry*> "}"
+  = <m:Modifiers> "interface" <i:Ident> <g:GenericDefinitions?> <ex:InterfaceExtends?> "{" <e:InterfaceEntry*> "}" ";"?
   => ast::Interface::from((m, i, g, ex, e));
 
 #[inline]
