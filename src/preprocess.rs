@@ -1,6 +1,7 @@
 use std::{collections::HashMap, fs, ops::Deref, path::Path, rc::Rc};
 
-use java_ast_parser::ast::{self, ClassCell, InterfaceCell};
+use java_ast_parser::ast::{self, ClassCell, InterfaceCell, TypeName};
+use log::warn;
 use topo_sort::{SortResults, TopoSort};
 
 use crate::index_tree::{GlobalIndexTree, ImportedIndexTree, LocalIndexTree, PackageIndexTree};
@@ -20,6 +21,17 @@ fn resolve_qualified_type(
     local_index_tree: &LocalIndexTree,
 ) {
     let Some(type_cell) = local_index_tree.search(Some(scope), r#type) else {
+        if let TypeName::Ident(_) = r#type.last().unwrap().name {
+            warn!(
+                "Failed to resolve type `{}`.",
+                r#type
+                    .iter()
+                    .map(|part| part.to_string())
+                    .collect::<Vec<_>>()
+                    .join(".")
+            );
+        }
+
         return;
     };
 

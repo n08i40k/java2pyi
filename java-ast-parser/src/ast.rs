@@ -216,17 +216,21 @@ pub struct Type {
 
 impl std::fmt::Display for Type {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "{}{}{}",
-            self.name,
-            self.generics
-                .iter()
-                .map(|part| part.to_string())
-                .collect::<Vec<_>>()
-                .join(", "),
-            "[]".repeat(self.array_depth)
-        )
+        if self.generics.is_empty() {
+            write!(f, "{}{}", self.name, "[]".repeat(self.array_depth))
+        } else {
+            write!(
+                f,
+                "{}<{}>{}",
+                self.name,
+                self.generics
+                    .iter()
+                    .map(|part| part.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                "[]".repeat(self.array_depth)
+            )
+        }
     }
 }
 

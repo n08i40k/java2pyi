@@ -12,6 +12,14 @@ mod preprocess;
 //mod pyi;
 
 fn main() {
+    if std::env::var("RUST_LOG").is_err() {
+        unsafe {
+            std::env::set_var("RUST_LOG", "info");
+        }
+    }
+
+    env_logger::init();
+
     let options = match parse_args(env::args().collect()) {
         Ok(options) => options,
         Err(message) => {
