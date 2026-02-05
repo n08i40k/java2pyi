@@ -106,6 +106,41 @@ impl std::fmt::Debug for TypeName {
     }
 }
 
+impl std::fmt::Display for TypeName {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TypeName::Void => write!(f, "void"),
+            TypeName::Boolean => write!(f, "boolean"),
+            TypeName::Char => write!(f, "char"),
+            TypeName::Short => write!(f, "short"),
+            TypeName::Integer => write!(f, "int"),
+            TypeName::Long => write!(f, "long"),
+            TypeName::Float => write!(f, "float"),
+            TypeName::Double => write!(f, "double"),
+            TypeName::Ident(ident) => write!(f, "{}", ident),
+            TypeName::ResolvedClass(class_cell) => {
+                let class = class_cell.borrow();
+
+                if class.generics.is_empty() {
+                    write!(f, "{}", class.ident)
+                } else {
+                    write!(
+                        f,
+                        "{}<{}>",
+                        class.ident,
+                        class
+                            .generics
+                            .iter()
+                            .map(|part| part.to_string())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )
+                }
+            }
+        }
+    }
+}
+
 impl TypeName {
     pub fn resolved_class(&self) -> Option<&ClassCell> {
         if let Self::ResolvedClass(class_cell) = self {
@@ -123,10 +158,53 @@ pub enum WildcardBoundary {
     Super(QualifiedType),
 }
 
+impl std::fmt::Display for WildcardBoundary {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            WildcardBoundary::None => write!(f, "?"),
+            WildcardBoundary::Extends(items) => write!(
+                f,
+                "? extends {}",
+                items
+                    .iter()
+                    .map(|part| part.to_string())
+                    .collect::<Vec<_>>()
+                    .join(".")
+            ),
+            WildcardBoundary::Super(items) => write!(
+                f,
+                "? super {}",
+                items
+                    .iter()
+                    .map(|part| part.to_string())
+                    .collect::<Vec<_>>()
+                    .join(".")
+            ),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum TypeGeneric {
     Type(QualifiedType),
     Wildcard(WildcardBoundary),
+}
+
+impl std::fmt::Display for TypeGeneric {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TypeGeneric::Type(items) => write!(
+                f,
+                "{}",
+                items
+                    .iter()
+                    .map(|part| part.to_string())
+                    .collect::<Vec<_>>()
+                    .join(".")
+            ),
+            TypeGeneric::Wildcard(wildcard_boundary) => wildcard_boundary.fmt(f),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -134,6 +212,22 @@ pub struct Type {
     pub name: TypeName,
     pub generics: Box<[TypeGeneric]>,
     pub array_depth: usize,
+}
+
+impl std::fmt::Display for Type {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}{}{}",
+            self.name,
+            self.generics
+                .iter()
+                .map(|part| part.to_string())
+                .collect::<Vec<_>>()
+                .join(", "),
+            "[]".repeat(self.array_depth)
+        )
+    }
 }
 
 pub type QualifiedType = Box<[Type]>;
@@ -171,6 +265,29 @@ impl Variable {
 pub struct GenericDefinition {
     pub ident: String,
     pub extends: Box<[QualifiedType]>,
+}
+
+impl std::fmt::Display for GenericDefinition {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.extends.is_empty() {
+            write!(f, "{}", self.ident)
+        } else {
+            write!(
+                f,
+                "{} extends {}",
+                self.ident,
+                self.extends
+                    .iter()
+                    .map(|extend| extend
+                        .iter()
+                        .map(|part| part.to_string())
+                        .collect::<Vec<_>>()
+                        .join("."))
+                    .collect::<Vec<_>>()
+                    .join(".")
+            )
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
