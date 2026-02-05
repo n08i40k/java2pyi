@@ -1,6 +1,6 @@
 use std::{collections::HashMap, fs, ops::Deref, path::Path, rc::Rc};
 
-use java_ast_parser::ast::{self, ClassCell, InterfaceCell, Type, TypeGeneric, TypeName};
+use java_ast_parser::ast::{self, ClassCell, EnumCell, InterfaceCell, Type, TypeGeneric, TypeName};
 use log::warn;
 use topo_sort::{SortResults, TopoSort};
 
@@ -18,7 +18,7 @@ pub fn parse_java_ast<P: AsRef<Path>>(
 fn resolve_qualified_type(
     generic_names: &[String],
     r#type: &mut ast::QualifiedType,
-    scope: &ClassCell,
+    scope: Option<&ClassCell>,
     local_index_tree: &LocalIndexTree,
 ) {
     if r#type.len() == 1
@@ -52,7 +52,7 @@ fn resolve_qualified_type(
         }
     }
 
-    let Some(type_cell) = local_index_tree.search(Some(scope), r#type) else {
+    let Some(type_cell) = local_index_tree.search(scope, r#type) else {
         if let TypeName::Ident(_) = r#type.last().unwrap().name {
             warn!(
                 "Failed to resolve type `{}`.",
@@ -74,43 +74,46 @@ fn resolve_qualified_type(
 fn resolve_type_names<'a, T: IntoIterator<Item = &'a (ClassCell, &'a LocalIndexTree)>>(
     iter: T,
 ) -> HashMap<ClassCell, ClassCell> {
-    let extends_map: HashMap<ClassCell, ClassCell> = HashMap::new();
+    let mut extends_map: HashMap<ClassCell, ClassCell> = HashMap::new();
 
     for (class_cell, local_index_tree) in iter {
         let mut class = class_cell.borrow_mut();
 
-        let generics = class
-            .generics
-            .iter()
-            .map(|g| g.ident.clone())
-            .collect::<Box<[_]>>();
+        let generics = collect_generic_names(&class.generics);
 
         if let Some(extends) = &mut class.extends {
-            resolve_qualified_type(&generics, extends, class_cell, local_index_tree);
+            resolve_qualified_type(&generics, extends, Some(class_cell), local_index_tree);
+            if let Some(ast::TypeName::ResolvedClass(parent_cell)) = extends.last().map(|t| &t.name)
+            {
+                extends_map.insert(class_cell.clone(), parent_cell.clone());
+            }
         }
 
         for variable in &mut class.variables {
             resolve_qualified_type(
                 &generics,
                 &mut variable.r#type,
-                class_cell,
+                Some(class_cell),
                 local_index_tree,
             );
         }
 
         for function in &mut class.functions {
+            let mut function_generics = generics.clone();
+            function_generics.extend(collect_generic_names(&function.generics));
+
             resolve_qualified_type(
-                &generics,
+                &function_generics,
                 &mut function.return_type,
-                class_cell,
+                Some(class_cell),
                 local_index_tree,
             );
 
             for argument in &mut function.arguments {
                 resolve_qualified_type(
-                    &generics,
+                    &function_generics,
                     &mut argument.r#type,
-                    class_cell,
+                    Some(class_cell),
                     local_index_tree,
                 );
             }
@@ -118,6 +121,85 @@ fn resolve_type_names<'a, T: IntoIterator<Item = &'a (ClassCell, &'a LocalIndexT
     }
 
     extends_map
+}
+
+fn resolve_interface_type_names<
+    'a,
+    T: IntoIterator<Item = &'a (InterfaceCell, &'a LocalIndexTree)>,
+>(
+    iter: T,
+) {
+    for (interface_cell, local_index_tree) in iter {
+        let mut interface = interface_cell.borrow_mut();
+        let generics = collect_generic_names(&interface.generics);
+
+        for extend in &mut interface.extends {
+            resolve_qualified_type(&generics, extend, None, local_index_tree);
+        }
+
+        for variable in &mut interface.variables {
+            resolve_qualified_type(&generics, &mut variable.r#type, None, local_index_tree);
+        }
+
+        for function in &mut interface.functions {
+            let mut function_generics = generics.clone();
+            function_generics.extend(collect_generic_names(&function.generics));
+
+            resolve_qualified_type(
+                &function_generics,
+                &mut function.return_type,
+                None,
+                local_index_tree,
+            );
+
+            for argument in &mut function.arguments {
+                resolve_qualified_type(
+                    &function_generics,
+                    &mut argument.r#type,
+                    None,
+                    local_index_tree,
+                );
+            }
+        }
+    }
+}
+
+fn resolve_enum_type_names<'a, T: IntoIterator<Item = &'a (EnumCell, &'a LocalIndexTree)>>(
+    iter: T,
+) {
+    for (enum_cell, local_index_tree) in iter {
+        let mut r#enum = enum_cell.borrow_mut();
+        let generics = collect_generic_names(&r#enum.generics);
+
+        for implement in &mut r#enum.implements {
+            resolve_qualified_type(&generics, implement, None, local_index_tree);
+        }
+
+        for variable in &mut r#enum.variables {
+            resolve_qualified_type(&generics, &mut variable.r#type, None, local_index_tree);
+        }
+
+        for function in &mut r#enum.functions {
+            let mut function_generics = generics.clone();
+            function_generics.extend(collect_generic_names(&function.generics));
+
+            resolve_qualified_type(
+                &function_generics,
+                &mut function.return_type,
+                None,
+                local_index_tree,
+            );
+
+            for argument in &mut function.arguments {
+                resolve_qualified_type(
+                    &function_generics,
+                    &mut argument.r#type,
+                    None,
+                    local_index_tree,
+                );
+            }
+        }
+    }
 }
 
 fn collect_scoped_classes<'a, T: IntoIterator<Item = &'a Scope>>(
@@ -137,6 +219,10 @@ fn collect_scoped_classes<'a, T: IntoIterator<Item = &'a Scope>>(
         for interface in &interface_cell.borrow().interfaces {
             walk_interface(classes, local_index_tree, interface);
         }
+
+        for r#enum in &interface_cell.borrow().enums {
+            walk_enum(classes, local_index_tree, r#enum);
+        }
     }
 
     fn walk_class<'a>(
@@ -153,6 +239,28 @@ fn collect_scoped_classes<'a, T: IntoIterator<Item = &'a Scope>>(
         for interface in &class_cell.borrow().interfaces {
             walk_interface(classes, local_index_tree, interface);
         }
+
+        for r#enum in &class_cell.borrow().enums {
+            walk_enum(classes, local_index_tree, r#enum);
+        }
+    }
+
+    fn walk_enum<'a>(
+        classes: &mut Vec<(ClassCell, &'a LocalIndexTree)>,
+        local_index_tree: &'a LocalIndexTree,
+        enum_cell: &EnumCell,
+    ) {
+        for class in &enum_cell.borrow().classes {
+            walk_class(classes, local_index_tree, class);
+        }
+
+        for interface in &enum_cell.borrow().interfaces {
+            walk_interface(classes, local_index_tree, interface);
+        }
+
+        for r#enum in &enum_cell.borrow().enums {
+            walk_enum(classes, local_index_tree, r#enum);
+        }
     }
 
     for scope in scopes {
@@ -163,9 +271,173 @@ fn collect_scoped_classes<'a, T: IntoIterator<Item = &'a Scope>>(
         for class in &scope.ast.classes {
             walk_class(&mut classes, &scope.local_index_tree, class);
         }
+
+        for r#enum in &scope.ast.enums {
+            walk_enum(&mut classes, &scope.local_index_tree, r#enum);
+        }
     }
 
     classes.into_boxed_slice()
+}
+
+fn collect_scoped_interfaces<'a, T: IntoIterator<Item = &'a Scope>>(
+    scopes: T,
+) -> Box<[(InterfaceCell, &'a LocalIndexTree)]> {
+    let mut interfaces: Vec<(InterfaceCell, &'a LocalIndexTree)> = Vec::new();
+
+    fn walk_interface<'a>(
+        interfaces: &mut Vec<(InterfaceCell, &'a LocalIndexTree)>,
+        local_index_tree: &'a LocalIndexTree,
+        interface_cell: &InterfaceCell,
+    ) {
+        interfaces.push((interface_cell.clone(), local_index_tree));
+
+        for class in &interface_cell.borrow().classes {
+            walk_class(interfaces, local_index_tree, class);
+        }
+
+        for interface in &interface_cell.borrow().interfaces {
+            walk_interface(interfaces, local_index_tree, interface);
+        }
+
+        for r#enum in &interface_cell.borrow().enums {
+            walk_enum(interfaces, local_index_tree, r#enum);
+        }
+    }
+
+    fn walk_class<'a>(
+        interfaces: &mut Vec<(InterfaceCell, &'a LocalIndexTree)>,
+        local_index_tree: &'a LocalIndexTree,
+        class_cell: &ClassCell,
+    ) {
+        for interface in &class_cell.borrow().interfaces {
+            walk_interface(interfaces, local_index_tree, interface);
+        }
+
+        for class in &class_cell.borrow().classes {
+            walk_class(interfaces, local_index_tree, class);
+        }
+
+        for r#enum in &class_cell.borrow().enums {
+            walk_enum(interfaces, local_index_tree, r#enum);
+        }
+    }
+
+    fn walk_enum<'a>(
+        interfaces: &mut Vec<(InterfaceCell, &'a LocalIndexTree)>,
+        local_index_tree: &'a LocalIndexTree,
+        enum_cell: &EnumCell,
+    ) {
+        for interface in &enum_cell.borrow().interfaces {
+            walk_interface(interfaces, local_index_tree, interface);
+        }
+
+        for class in &enum_cell.borrow().classes {
+            walk_class(interfaces, local_index_tree, class);
+        }
+
+        for r#enum in &enum_cell.borrow().enums {
+            walk_enum(interfaces, local_index_tree, r#enum);
+        }
+    }
+
+    for scope in scopes {
+        for interface in &scope.ast.interfaces {
+            walk_interface(&mut interfaces, &scope.local_index_tree, interface);
+        }
+
+        for class in &scope.ast.classes {
+            walk_class(&mut interfaces, &scope.local_index_tree, class);
+        }
+
+        for r#enum in &scope.ast.enums {
+            walk_enum(&mut interfaces, &scope.local_index_tree, r#enum);
+        }
+    }
+
+    interfaces.into_boxed_slice()
+}
+
+fn collect_scoped_enums<'a, T: IntoIterator<Item = &'a Scope>>(
+    scopes: T,
+) -> Box<[(EnumCell, &'a LocalIndexTree)]> {
+    let mut enums: Vec<(EnumCell, &'a LocalIndexTree)> = Vec::new();
+
+    fn walk_enum<'a>(
+        enums: &mut Vec<(EnumCell, &'a LocalIndexTree)>,
+        local_index_tree: &'a LocalIndexTree,
+        enum_cell: &EnumCell,
+    ) {
+        enums.push((enum_cell.clone(), local_index_tree));
+
+        for class in &enum_cell.borrow().classes {
+            walk_class(enums, local_index_tree, class);
+        }
+
+        for interface in &enum_cell.borrow().interfaces {
+            walk_interface(enums, local_index_tree, interface);
+        }
+
+        for r#enum in &enum_cell.borrow().enums {
+            walk_enum(enums, local_index_tree, r#enum);
+        }
+    }
+
+    fn walk_class<'a>(
+        enums: &mut Vec<(EnumCell, &'a LocalIndexTree)>,
+        local_index_tree: &'a LocalIndexTree,
+        class_cell: &ClassCell,
+    ) {
+        for r#enum in &class_cell.borrow().enums {
+            walk_enum(enums, local_index_tree, r#enum);
+        }
+
+        for class in &class_cell.borrow().classes {
+            walk_class(enums, local_index_tree, class);
+        }
+
+        for interface in &class_cell.borrow().interfaces {
+            walk_interface(enums, local_index_tree, interface);
+        }
+    }
+
+    fn walk_interface<'a>(
+        enums: &mut Vec<(EnumCell, &'a LocalIndexTree)>,
+        local_index_tree: &'a LocalIndexTree,
+        interface_cell: &InterfaceCell,
+    ) {
+        for r#enum in &interface_cell.borrow().enums {
+            walk_enum(enums, local_index_tree, r#enum);
+        }
+
+        for class in &interface_cell.borrow().classes {
+            walk_class(enums, local_index_tree, class);
+        }
+
+        for interface in &interface_cell.borrow().interfaces {
+            walk_interface(enums, local_index_tree, interface);
+        }
+    }
+
+    for scope in scopes {
+        for r#enum in &scope.ast.enums {
+            walk_enum(&mut enums, &scope.local_index_tree, r#enum);
+        }
+
+        for class in &scope.ast.classes {
+            walk_class(&mut enums, &scope.local_index_tree, class);
+        }
+
+        for interface in &scope.ast.interfaces {
+            walk_interface(&mut enums, &scope.local_index_tree, interface);
+        }
+    }
+
+    enums.into_boxed_slice()
+}
+
+fn collect_generic_names(generics: &[ast::GenericDefinition]) -> Vec<String> {
+    generics.iter().map(|g| g.ident.clone()).collect()
 }
 
 fn merge_inherited_members<'a, T: IntoIterator<Item = &'a ClassCell>>(
@@ -240,6 +512,7 @@ fn topo_sort_extendables<'a, T: IntoIterator<Item = &'a ClassCell>>(
     Some(nodes.into_boxed_slice())
 }
 
+#[derive(Debug)]
 pub struct Scope {
     pub ast: Rc<ast::Root>,
     pub local_index_tree: LocalIndexTree,
@@ -302,8 +575,12 @@ pub fn preprocess_asts(roots: &[Rc<ast::Root>], inherit_by_merge: bool) -> Resul
     let scopes = Scope::from_roots(roots);
 
     let scoped_classes = collect_scoped_classes(&scopes);
+    let scoped_interfaces = collect_scoped_interfaces(&scopes);
+    let scoped_enums = collect_scoped_enums(&scopes);
 
     let extends_map = resolve_type_names(&scoped_classes);
+    resolve_interface_type_names(&scoped_interfaces);
+    resolve_enum_type_names(&scoped_enums);
 
     let classes = scoped_classes
         .into_iter()

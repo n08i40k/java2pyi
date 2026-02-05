@@ -1,4 +1,4 @@
-use java_ast_parser::ast::{self, ClassCell, InterfaceCell, Root};
+use java_ast_parser::ast::{self, ClassCell, EnumCell, InterfaceCell, Root};
 use orx_tree::{Bfs, Dyn, DynTree, NodeIdx, NodeRef};
 use std::{
     cell::{Ref, RefCell},
@@ -12,6 +12,7 @@ pub enum TreeNode {
     Root,
     Package(RefCell<String>),
     Class(ClassCell),
+    Enum(EnumCell),
     Interface(InterfaceCell),
 }
 
@@ -24,6 +25,10 @@ impl TreeNode {
                 .map(|cell_ref| Ref::map(cell_ref, |x| x.as_str()))
                 .ok(),
             TreeNode::Class(cell) => cell
+                .try_borrow()
+                .map(|cell_ref| Ref::map(cell_ref, |x| x.ident.as_str()))
+                .ok(),
+            TreeNode::Enum(cell) => cell
                 .try_borrow()
                 .map(|cell_ref| Ref::map(cell_ref, |x| x.ident.as_str()))
                 .ok(),
@@ -72,6 +77,12 @@ impl From<&ClassCell> for TreeNode {
 impl From<&InterfaceCell> for TreeNode {
     fn from(value: &InterfaceCell) -> Self {
         Self::Interface(value.clone())
+    }
+}
+
+impl From<&EnumCell> for TreeNode {
+    fn from(value: &EnumCell) -> Self {
+        Self::Enum(value.clone())
     }
 }
 pub type IndexTree = DynTree<TreeNode>;
@@ -152,6 +163,8 @@ impl PackageIndexTree {
                 walk_interface(tree, self_idx, interface_cell);
             }
 
+            for enum_cell in &self_ref.enums {
+                walk_enum(tree, self_idx, enum_cell);
             }
         }
 
@@ -175,6 +188,33 @@ impl PackageIndexTree {
                 walk_interface(tree, self_idx, interface_cell);
             }
 
+            for enum_cell in &self_ref.enums {
+                walk_enum(tree, self_idx, enum_cell);
+            }
+        }
+
+        fn walk_enum(
+            tree: &mut DynTree<TreeNode>,
+            parent_idx: NodeIdx<Dyn<TreeNode>>,
+            self_cell: &EnumCell,
+        ) {
+            let self_idx = {
+                let mut parent_mut = tree.node_mut(parent_idx);
+                parent_mut.push_child(TreeNode::from(self_cell))
+            };
+
+            let self_ref = self_cell.borrow();
+
+            for class_cell in &self_ref.classes {
+                walk_class(tree, self_idx, class_cell);
+            }
+
+            for interface_cell in &self_ref.interfaces {
+                walk_interface(tree, self_idx, interface_cell);
+            }
+
+            for enum_cell in &self_ref.enums {
+                walk_enum(tree, self_idx, enum_cell);
             }
         }
 
@@ -187,6 +227,10 @@ impl PackageIndexTree {
 
         for class_cell in &ast.classes {
             walk_class(&mut tree, root_idx, class_cell);
+        }
+
+        for enum_cell in &ast.enums {
+            walk_enum(&mut tree, root_idx, enum_cell);
         }
 
         Self {
