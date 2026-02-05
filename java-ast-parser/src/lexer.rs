@@ -276,6 +276,9 @@ pub enum Token<'a> {
     #[token("boolean")]
     TypeBoolean,
 
+    #[token("byte")]
+    TypeByte,
+
     #[token("char")]
     TypeChar,
 

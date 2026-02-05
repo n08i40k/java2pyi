@@ -76,6 +76,7 @@ impl IntoOwned for Modifiers {
 pub enum TypeName {
     Void,
     Boolean,
+    Byte,
     Char,
     Short,
     Integer,
@@ -92,6 +93,7 @@ impl std::fmt::Debug for TypeName {
         match self {
             Self::Void => write!(f, "Void"),
             Self::Boolean => write!(f, "Boolean"),
+            Self::Byte => write!(f, "Byte"),
             Self::Char => write!(f, "Char"),
             Self::Short => write!(f, "Short"),
             Self::Integer => write!(f, "Integer"),
@@ -113,6 +115,7 @@ impl std::fmt::Display for TypeName {
         match self {
             TypeName::Void => write!(f, "void"),
             TypeName::Boolean => write!(f, "boolean"),
+            TypeName::Byte => write!(f, "byte"),
             TypeName::Char => write!(f, "char"),
             TypeName::Short => write!(f, "short"),
             TypeName::Integer => write!(f, "int"),
