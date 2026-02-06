@@ -10,7 +10,9 @@ pub fn generate_pyi_by_package(
     roots: &[Rc<Root>],
     namespace_prefix: Option<&str>,
 ) -> HashMap<String, String> {
-    let definition_paths = Rc::new(collect_definition_paths(roots, namespace_prefix));
+    let normalized_prefix = normalize_namespace_prefix(namespace_prefix);
+    let definition_paths =
+        Rc::new(collect_definition_paths(roots, normalized_prefix.as_deref()));
     let class_paths = Rc::new(definition_paths.class_paths.clone());
 
     let mut roots_by_package: HashMap<String, Vec<Rc<Root>>> = HashMap::new();
@@ -24,8 +26,12 @@ pub fn generate_pyi_by_package(
     let mut outputs = HashMap::new();
     for (package, package_roots) in roots_by_package {
         let type_params = collect_type_params(&package_roots);
-        let mut emitter =
-            PyiEmitter::new(type_params, class_paths.clone(), definition_paths.clone());
+        let mut emitter = PyiEmitter::new(
+            type_params,
+            class_paths.clone(),
+            definition_paths.clone(),
+            normalized_prefix.clone(),
+        );
 
         emitter.emit_header();
 
@@ -53,6 +59,7 @@ struct PyiEmitter {
     type_params: BTreeSet<String>,
     type_renderer: TypeRenderer,
     definition_paths: Rc<DefinitionPaths>,
+    namespace_import: Option<String>,
 }
 
 impl PyiEmitter {
@@ -60,6 +67,7 @@ impl PyiEmitter {
         type_params: BTreeSet<String>,
         class_paths: Rc<HashMap<ClassCell, String>>,
         definition_paths: Rc<DefinitionPaths>,
+        namespace_import: Option<String>,
     ) -> Self {
         Self {
             output: String::new(),
@@ -67,11 +75,15 @@ impl PyiEmitter {
             type_params,
             type_renderer: TypeRenderer::new(class_paths),
             definition_paths,
+            namespace_import,
         }
     }
 
     fn emit_header(&mut self) {
         self.line("from __future__ import annotations".to_string());
+        if let Some(namespace_import) = &self.namespace_import {
+            self.line(format!("import {}", namespace_import));
+        }
         self.line("from typing import Any, TypeVar, overload".to_string());
         self.blank_line();
 
