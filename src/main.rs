@@ -78,6 +78,7 @@ fn main() {
             fs::create_dir_all(parent).unwrap();
         }
         fs::write(&file_path, contents).unwrap();
+        ensure_parent_inits(&file_path, &options.out_dir).unwrap();
         println!("wrote {}", file_path.display());
     }
 }
@@ -104,6 +105,24 @@ fn package_to_path(out_dir: &Path, package: &str, namespace_prefix: Option<&str>
 
     path.push("__init__.pyi");
     path
+}
+
+fn ensure_parent_inits(file_path: &Path, out_dir: &Path) -> std::io::Result<()> {
+    let mut current = file_path.parent();
+    while let Some(dir) = current {
+        if dir == out_dir {
+            break;
+        }
+
+        let init_path = dir.join("__init__.py");
+        if init_path != file_path && !init_path.exists() {
+            fs::write(&init_path, "")?;
+        }
+
+        current = dir.parent();
+    }
+
+    Ok(())
 }
 
 struct CliOptions {
