@@ -166,7 +166,7 @@ TypeGeneric: ast::TypeGeneric = {
   "?" "super" <t:QualifiedType>   => ast::TypeGeneric::Wildcard(ast::WildcardBoundary::Super(t)),
 };
 
-TypeGenerics: Box<[ast::TypeGeneric]> = "<" <l:CommaList<TypeGeneric>?> ">" => l.unwrap_or(Box::from([]));
+pub TypeGenerics: Box<[ast::TypeGeneric]> = "<" <l:CommaList<TypeGeneric>?> ">" => l.unwrap_or(Box::from([]));
 
 Type: ast::Type 
   = <n:TypeName> <g:TypeGenerics?> <a:("[" "]")*>

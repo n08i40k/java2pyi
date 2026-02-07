@@ -9,17 +9,19 @@
 //! assert_eq!(first.1, Token::Syntax);
 //! ```
 
-use logos::{Logos, Span};
+use itertools::{Itertools, MultiPeek};
+use logos::{Logos, Span, SpannedIter};
 use ownable::IntoOwned;
 use std::{
     borrow::Cow,
     cell::RefCell,
     collections::VecDeque,
-    iter::Peekable,
     num::{ParseFloatError, ParseIntError},
-    ops::DerefMut,
+    ops::{DerefMut, Range},
     rc::Rc,
 };
+
+use crate::java;
 
 /// Categories of lexical errors produced by [`Lexer`].
 #[derive(Default, Debug, Clone, PartialEq)]
@@ -363,14 +365,16 @@ enum Scope {
 
 /// Streaming lexer that yields spanned tokens.
 pub struct Lexer<'input> {
-    inner: Peekable<logos::SpannedIter<'input, Token<'input>>>,
+    input: &'input str,
+    inner: MultiPeek<logos::SpannedIter<'input, Token<'input>>>,
     scope_stack: VecDeque<Rc<RefCell<Scope>>>,
 }
 
 impl<'input> Lexer<'input> {
     pub fn new(src: &'input str) -> Self {
         Self {
-            inner: Token::lexer(src).spanned().peekable(),
+            input: src,
+            inner: Token::lexer(src).spanned().multipeek(),
             scope_stack: VecDeque::from([Rc::from(RefCell::from(Scope::Root))]),
         }
     }
@@ -378,6 +382,88 @@ impl<'input> Lexer<'input> {
 
 /// LALRPOP-compatible spanned token wrapper.
 pub type Spanned<Tok, Loc, Error> = Result<(Loc, Tok, Loc), Error>;
+
+fn wait_until_bracket_end<'input>(
+    mut curr_tok: Option<(Result<Token<'input>, LexicalErrorKind>, Range<usize>)>,
+    iter: &mut MultiPeek<logos::SpannedIter<'input, Token<'input>>>,
+) -> Option<Spanned<Token<'input>, usize, LexicalError>> {
+    let mut expr_level = 1;
+
+    loop {
+        let (tok, span) = curr_tok.take().or_else(|| iter.next())?;
+
+        let tok = match tok {
+            Ok(tok) => tok,
+            Err(kind) => {
+                return Some(Err(LexicalError { kind, span }));
+            }
+        };
+
+        match &tok {
+            Token::OpenBrace => {
+                expr_level += 1;
+            }
+            Token::CloseBrace => {
+                expr_level -= 1;
+
+                if expr_level == 0 {
+                    return Some(Ok((span.start, tok, span.end)));
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+pub struct CommitPeek<'a, 'input> {
+    it: &'a mut MultiPeek<SpannedIter<'input, Token<'input>>>,
+    peeked: usize,
+}
+
+impl<'a, 'input> CommitPeek<'a, 'input> {
+    pub fn new(iter: &'a mut MultiPeek<SpannedIter<'input, Token<'input>>>) -> Self {
+        Self {
+            it: iter,
+            peeked: 0,
+        }
+    }
+
+    pub fn commit_peek(
+        &mut self,
+    ) -> Option<(Result<Token<'input>, LexicalErrorKind>, Range<usize>)> {
+        let mut r = None;
+
+        for _ in 0..(self.peeked.max(1) - 1) {
+            r = self.it.next();
+
+            if let Some((Err(_), _)) = &r {
+                return r;
+            }
+        }
+
+        self.peeked = 0;
+
+        r
+    }
+}
+
+impl<'a, 'input> Iterator for CommitPeek<'a, 'input> {
+    type Item = Result<(usize, Token<'input>, usize), LexicalError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let out = self.it.peek();
+        self.peeked += 1;
+
+        out.map(|(tok, span)| {
+            tok.clone()
+                .map(|x| (span.start, x, span.end))
+                .map_err(|kind| LexicalError {
+                    kind,
+                    span: span.clone(),
+                })
+        })
+    }
+}
 
 impl<'input> Iterator for Lexer<'input> {
     type Item = Spanned<Token<'input>, usize, LexicalError>;
@@ -536,10 +622,44 @@ impl<'input> Iterator for Lexer<'input> {
                         };
 
                         match &tok {
+                            Token::Ident(_) => {
+                                if !matches!(self.inner.peek(), Some((Ok(Token::OpenAngle), _))) {
+                                    continue;
+                                }
+
+                                self.inner.reset_peek();
+
+                                //skip generics
+                                let generics_parser = java::TypeGenericsParser::new();
+                                let mut commit_iter = CommitPeek::new(&mut self.inner);
+
+                                let result = generics_parser.parse(self.input, &mut commit_iter);
+
+                                if result.is_ok()
+                                    || matches!(
+                                        result,
+                                        Err(lalrpop_util::ParseError::ExtraToken { .. })
+                                    )
+                                {
+                                    commit_iter.commit_peek();
+                                }
+
+                                if let Err(lalrpop_util::ParseError::UnrecognizedToken {
+                                    expected,
+                                    ..
+                                }) = result
+                                    && expected.is_empty()
+                                {
+                                    commit_iter.commit_peek();
+                                }
+                            }
                             Token::OpenBrace => {
+                                let _ = wait_until_bracket_end(None, &mut self.inner)?;
+                            }
+                            Token::OpenPth | Token::OpenBracket => {
                                 expr_level += 1;
                             }
-                            Token::CloseBrace => {
+                            Token::ClosePth | Token::CloseBracket => {
                                 if expr_level == 0 {
                                     return Some(Err(LexicalError {
                                         kind: LexicalErrorKind::InvalidToken,
@@ -549,7 +669,7 @@ impl<'input> Iterator for Lexer<'input> {
 
                                 expr_level -= 1;
                             }
-                            Token::Semicolon => {
+                            Token::Semicolon | Token::Comma => {
                                 if expr_level == 0 {
                                     return Some(Ok((span.start, tok, span.end)));
                                 }
@@ -561,35 +681,9 @@ impl<'input> Iterator for Lexer<'input> {
                 _ => {}
             },
             Scope::Function => {
-                let mut expr_level = 1;
+                self.scope_stack.pop_back();
 
-                let mut _current_spanned_tok = Some((Ok(tok), span));
-
-                loop {
-                    let (tok, span) = _current_spanned_tok.take().or_else(|| self.inner.next())?;
-
-                    let tok = match tok {
-                        Ok(tok) => tok,
-                        Err(kind) => {
-                            return Some(Err(LexicalError { kind, span }));
-                        }
-                    };
-
-                    match &tok {
-                        Token::OpenBrace => {
-                            expr_level += 1;
-                        }
-                        Token::CloseBrace => {
-                            expr_level -= 1;
-
-                            if expr_level == 0 {
-                                self.scope_stack.pop_back();
-                                return Some(Ok((span.start, tok, span.end)));
-                            }
-                        }
-                        _ => {}
-                    }
-                }
+                return wait_until_bracket_end(Some((Ok(tok), span)), &mut self.inner);
             }
             Scope::EnumVariant => {
                 let mut expr_level = 1;

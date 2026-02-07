@@ -8,6 +8,7 @@ lalrpop-util = "*"
 logos = "*"
 ownable = "1.0.0"
 bitflags = "2.10.0"
+itertools = "0.14.0"
 
 [build-dependencies]
 lalrpop = "*"
