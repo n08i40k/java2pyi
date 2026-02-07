@@ -62,6 +62,7 @@ extern {
         "private" => lexer::Token::KeywordPrivate,
         "protected" => lexer::Token::KeywordProtected,
         "public" => lexer::Token::KeywordPublic,
+        "record" => lexer::Token::KeywordRecord,
         "requires" => lexer::Token::KeywordRequires,
         "return" => lexer::Token::KeywordReturn,
         "sealed" => lexer::Token::KeywordSealed,
@@ -99,6 +100,7 @@ UnsafeIdent: Cow<'input, str> = {
   <Ident> => <>,
   "module" => Cow::from("module"),
   "this" => Cow::from("this"),
+  "record" => Cow::from("record"),
 };
 
 #[inline]
@@ -248,9 +250,13 @@ ClassEntry: ast::ClassEntry = {
 #[inline]
 ClassExtends: ast::QualifiedType = "extends" <t:QualifiedType> => t;
 
-Class: ast::Class
-  = <m:Modifiers> "class" <i:Ident> <g:GenericDefinitions?> <ex:ClassExtends?> <im:ObjectImplements?> <p:ObjectPermits?> "{" <en:OptionalSemicolonList<ClassEntry>?> "}"
-  => ast::Class::from((m, i, g, ex, im, p, en));
+Class: ast::Class = {
+  <m:Modifiers> "class" <i:Ident> <g:GenericDefinitions?> <ex:ClassExtends?> <im:ObjectImplements?> <p:ObjectPermits?> "{" <en:OptionalSemicolonList<ClassEntry>?> "}"
+  => ast::Class::from((m, i, g, ex, im, p, en)),
+
+  <m:Modifiers> "record" <i:Ident> <g:GenericDefinitions?> "(" <a:CommaList<FunctionArgument>?> ")" <im:ObjectImplements?> "{" <en:OptionalSemicolonList<ClassEntry>?> "}"
+  => ast::Class::from((m, i, g, a, im, en)),
+};
 
 #[inline]
 EnumVariant: () = Ident ("(" ")")? ("{" "}")?;

@@ -232,6 +232,8 @@ pub enum Token<'a> {
     #[token("public")]
     KeywordPublic,
 
+    #[token("record")]
+    KeywordRecord,
     #[token("requires")]
     KeywordRequires,
 
@@ -368,7 +370,17 @@ impl<'input> Iterator for Lexer<'input> {
 
         match current_scope.borrow_mut().deref_mut() {
             Scope::Root => match &tok {
-                Token::KeywordClass | Token::KeywordInterface | Token::KeywordEnum => {
+                Token::KeywordClass
+                | Token::KeywordInterface
+                | Token::KeywordEnum
+                | Token::KeywordRecord => {
+                    if let Token::KeywordRecord = tok
+                        && let Some((Ok(next_tok), _)) = self.inner.peek()
+                        && !matches!(next_tok, Token::Ident(_))
+                    {
+                        return Some(Ok((span.start, tok, span.end)));
+                    }
+
                     self.scope_stack
                         .push_back(Rc::from(RefCell::from(Scope::Object {
                             skip_pths: tok == Token::KeywordEnum,
@@ -378,7 +390,17 @@ impl<'input> Iterator for Lexer<'input> {
                 _ => {}
             },
             Scope::Object { skip_pths, in_body } => match &tok {
-                Token::KeywordClass | Token::KeywordInterface | Token::KeywordEnum => {
+                Token::KeywordClass
+                | Token::KeywordInterface
+                | Token::KeywordEnum
+                | Token::KeywordRecord => {
+                    if let Token::KeywordRecord = tok
+                        && let Some((Ok(next_tok), _)) = self.inner.peek()
+                        && !matches!(next_tok, Token::Ident(_))
+                    {
+                        return Some(Ok((span.start, tok, span.end)));
+                    }
+
                     self.scope_stack
                         .push_back(Rc::from(RefCell::from(Scope::Object {
                             skip_pths: tok == Token::KeywordEnum,

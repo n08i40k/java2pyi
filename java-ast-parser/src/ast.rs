@@ -363,6 +363,128 @@ impl
         Modifiers,
         Cow<'_, str>,
         Option<Box<[GenericDefinition]>>,
+        Option<Box<[FunctionArgument]>>,
+        Option<Box<[QualifiedType]>>,
+        Option<Box<[ClassEntry]>>,
+    )> for Class
+{
+    fn from(
+        value: (
+            Modifiers,
+            Cow<'_, str>,
+            Option<Box<[GenericDefinition]>>,
+            Option<Box<[FunctionArgument]>>,
+            Option<Box<[QualifiedType]>>,
+            Option<Box<[ClassEntry]>>,
+        ),
+    ) -> Self {
+        let (mut modifiers, ident, generics, args, implements, entries) = value;
+
+        modifiers.insert(Modifiers::FINAL);
+
+        let mut variables = Vec::new();
+        let mut functions = Vec::new();
+        let mut classes = Vec::new();
+        let mut enums = Vec::new();
+        let mut interfaces = Vec::new();
+
+        if let Some(entries) = entries {
+            for entry in entries {
+                match entry {
+                    ClassEntry::Variables(v) => variables.append(&mut v.into_vec()),
+                    ClassEntry::Function(f) => functions.push(f),
+                    ClassEntry::Class(c) => classes.push(c),
+                    ClassEntry::Enum(e) => enums.push(e),
+                    ClassEntry::Interface(i) => interfaces.push(i),
+                    ClassEntry::Skip => {}
+                }
+            }
+        }
+
+        functions.push(Function {
+            modifiers: Modifiers::PUBLIC | Modifiers::STATIC,
+            generics: Box::new([]),
+            return_type: QualifiedType::from([Type {
+                name: TypeName::Ident(ident.to_string()),
+                generics: generics
+                    .clone()
+                    .unwrap_or_else(|| Box::new([]))
+                    .into_iter()
+                    .map(|x| {
+                        TypeGeneric::Type(QualifiedType::from([Type {
+                            name: TypeName::Ident(x.ident),
+                            generics: Box::new([]),
+                            array_depth: 0,
+                        }]))
+                    })
+                    .collect::<Box<[_]>>(),
+                array_depth: 0,
+            }]),
+            ident: "__ctor".to_string(),
+            arguments: args.clone().unwrap_or_else(|| Box::new([])),
+        });
+
+        if let Some(args) = args {
+            for mut arg in args {
+                arg.modifiers.insert(Modifiers::PRIVATE | Modifiers::FINAL);
+
+                if arg.vararg {
+                    arg.r#type.last_mut().unwrap().array_depth += 1;
+                }
+
+                functions.push(Function {
+                    modifiers: Modifiers::PUBLIC,
+                    generics: Box::new([]),
+                    return_type: arg.r#type.clone(),
+                    ident: arg.ident.clone(),
+                    arguments: Box::new([]),
+                });
+
+                variables.push(Variable {
+                    modifiers: arg.modifiers,
+                    r#type: arg.r#type,
+                    ident: arg.ident,
+                });
+            }
+        }
+
+        Self {
+            modifiers,
+            ident: ident.to_string(),
+            generics: generics.unwrap_or(Box::new([])),
+            extends: Some(Box::new([
+                Type {
+                    name: TypeName::Ident("java".to_string()),
+                    generics: Box::new([]),
+                    array_depth: 0,
+                },
+                Type {
+                    name: TypeName::Ident("lang".to_string()),
+                    generics: Box::new([]),
+                    array_depth: 0,
+                },
+                Type {
+                    name: TypeName::Ident("Record".to_string()),
+                    generics: Box::new([]),
+                    array_depth: 0,
+                },
+            ])),
+            implements: implements.unwrap_or(Box::from([])),
+            permits: Box::from([]),
+            variables: variables.into_boxed_slice(),
+            functions: functions.into_boxed_slice(),
+            classes: classes.into_iter().map(ClassCell::from).collect(),
+            enums: enums.into_iter().map(EnumCell::from).collect(),
+            interfaces: interfaces.into_iter().map(InterfaceCell::from).collect(),
+        }
+    }
+}
+
+impl
+    From<(
+        Modifiers,
+        Cow<'_, str>,
+        Option<Box<[GenericDefinition]>>,
         Option<QualifiedType>,
         Option<Box<[QualifiedType]>>,
         Option<Box<[QualifiedType]>>,
