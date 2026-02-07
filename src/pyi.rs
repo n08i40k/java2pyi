@@ -6,13 +6,25 @@ use java_ast_parser::ast::{
     TypeGeneric, TypeName, WildcardBoundary,
 };
 
+trait QualifiedTypeFormat {
+    fn fmt(&self) -> String;
+}
+
+impl QualifiedTypeFormat for QualifiedType {
+    fn fmt(&self) -> String {
+        self.iter()
+            .map(|x| x.to_string())
+            .collect::<Box<[_]>>()
+            .join(".")
+    }
+}
+
 pub fn generate_pyi_by_package(
     roots: &[Rc<Root>],
     namespace_prefix: &str,
 ) -> HashMap<String, String> {
     let normalized_prefix = normalize_namespace_prefix(namespace_prefix);
-    let definition_paths =
-        Rc::new(collect_definition_paths(roots, &normalized_prefix));
+    let definition_paths = Rc::new(collect_definition_paths(roots, &normalized_prefix));
     let class_paths = Rc::new(definition_paths.class_paths.clone());
 
     let mut roots_by_package: HashMap<String, Vec<Rc<Root>>> = HashMap::new();
@@ -117,8 +129,12 @@ impl PyiEmitter {
         };
 
         let mut line = format!("class {}{}:", class.ident, bases_suffix);
-        if rendered_bases.has_unknown {
-            line.push_str(&format!("  # unknown type used in {}", class_path));
+        if rendered_bases.unknown.len() > 0 {
+            line.push_str(&format!(
+                "  # unknown type(s) [{}] used in {}",
+                rendered_bases.unknown.join(", "),
+                class_path
+            ));
         }
         self.line(line);
         self.indent += 1;
@@ -132,8 +148,10 @@ impl PyiEmitter {
             let mut line = format!("{}: {}", ident, rendered.text);
             if rendered.has_unknown() {
                 line.push_str(&format!(
-                    "  # unknown type used in {}.{}",
-                    class_path, variable.ident
+                    "  # unknown type(s) [{}] used in {}.{}",
+                    rendered.unknown.join(", "),
+                    class_path,
+                    variable.ident
                 ));
             }
             self.line(line);
@@ -144,8 +162,7 @@ impl PyiEmitter {
             let filtered = function_group
                 .into_iter()
                 .filter(|function| {
-                    function.ident == "__ctor"
-                        || !function.modifiers.intersects(Modifiers::STATIC)
+                    function.ident == "__ctor" || !function.modifiers.intersects(Modifiers::STATIC)
                 })
                 .collect::<Vec<_>>();
             if filtered.is_empty() {
@@ -191,8 +208,12 @@ impl PyiEmitter {
         };
 
         let mut line = format!("class {}{}:", interface.ident, bases_suffix);
-        if rendered_bases.has_unknown {
-            line.push_str(&format!("  # unknown type used in {}", interface_path));
+        if rendered_bases.unknown.len() > 0 {
+            line.push_str(&format!(
+                "  # unknown type(s) [{}] used in {}",
+                rendered_bases.unknown.join(", "),
+                interface_path
+            ));
         }
         self.line(line);
         self.indent += 1;
@@ -206,8 +227,10 @@ impl PyiEmitter {
             let mut line = format!("{}: {}", ident, rendered.text);
             if rendered.has_unknown() {
                 line.push_str(&format!(
-                    "  # unknown type used in {}.{}",
-                    interface_path, variable.ident
+                    "  # unknown type(s) [{}] used in {}.{}",
+                    rendered.unknown.join(", "),
+                    interface_path,
+                    variable.ident
                 ));
             }
             self.line(line);
@@ -218,8 +241,7 @@ impl PyiEmitter {
             let filtered = function_group
                 .into_iter()
                 .filter(|function| {
-                    function.ident == "__ctor"
-                        || !function.modifiers.intersects(Modifiers::STATIC)
+                    function.ident == "__ctor" || !function.modifiers.intersects(Modifiers::STATIC)
                 })
                 .collect::<Vec<_>>();
             if filtered.is_empty() {
@@ -265,8 +287,12 @@ impl PyiEmitter {
         };
 
         let mut line = format!("class {}{}:", r#enum.ident, bases_suffix);
-        if rendered_bases.has_unknown {
-            line.push_str(&format!("  # unknown type used in {}", enum_path));
+        if rendered_bases.unknown.len() > 0 {
+            line.push_str(&format!(
+                "  # unknown type(s) [{}] used in {}",
+                rendered_bases.unknown.join(", "),
+                enum_path
+            ));
         }
         self.line(line);
         self.indent += 1;
@@ -280,8 +306,10 @@ impl PyiEmitter {
             let mut line = format!("{}: {}", ident, rendered.text);
             if rendered.has_unknown() {
                 line.push_str(&format!(
-                    "  # unknown type used in {}.{}",
-                    enum_path, variable.ident
+                    "  # unknown type(s) [{}] used in {}.{}",
+                    rendered.unknown.join(", "),
+                    enum_path,
+                    variable.ident
                 ));
             }
             self.line(line);
@@ -292,8 +320,7 @@ impl PyiEmitter {
             let filtered = function_group
                 .into_iter()
                 .filter(|function| {
-                    function.ident == "__ctor"
-                        || !function.modifiers.intersects(Modifiers::STATIC)
+                    function.ident == "__ctor" || !function.modifiers.intersects(Modifiers::STATIC)
                 })
                 .collect::<Vec<_>>();
             if filtered.is_empty() {
@@ -343,26 +370,26 @@ impl PyiEmitter {
             args.push("self".to_string());
         }
 
-        let mut unknown_paths = BTreeSet::new();
+        let mut unknown_paths = HashMap::new();
         for argument in &function.arguments {
             let rendered = self.type_renderer.render(&argument.r#type);
             let arg_prefix = if argument.vararg { "*" } else { "" };
             let ident = sanitize_ident(&argument.ident);
-            args.push(format!(
-                "{}{}: {}",
-                arg_prefix, ident, rendered.text
-            ));
+            args.push(format!("{}{}: {}", arg_prefix, ident, rendered.text));
             if rendered.has_unknown() {
-                unknown_paths.insert(format!(
-                    "{}.{}.{}",
-                    class_path, function.ident, argument.ident
-                ));
+                unknown_paths.insert(
+                    format!("{}.{}.{}", class_path, function.ident, argument.ident),
+                    rendered.unknown,
+                );
             }
         }
 
         let rendered_return = self.type_renderer.render(&function.return_type);
         if rendered_return.has_unknown() {
-            unknown_paths.insert(format!("{}.{}", class_path, function.ident));
+            unknown_paths.insert(
+                format!("{}.{}", class_path, function.ident),
+                rendered_return.unknown,
+            );
         }
 
         let mut line = format!(
@@ -374,12 +401,14 @@ impl PyiEmitter {
 
         if !unknown_paths.is_empty() {
             let paths = unknown_paths.into_iter().collect::<Vec<_>>();
-            let label = if paths.len() > 1 {
-                "unknown types used in"
-            } else {
-                "unknown type used in"
-            };
-            line.push_str(&format!("  # {} {}", label, paths.join("; ")));
+            line.push_str(&format!(
+                "  # unknown type(s) used in {}",
+                paths
+                    .into_iter()
+                    .map(|(k, v)| format!("{} -> [{}]", k, v.join(", ")))
+                    .collect::<Box<[_]>>()
+                    .join("; ")
+            ));
         }
 
         self.line(line);
@@ -641,26 +670,29 @@ fn collect_module_imports(
 
 struct RenderedBases {
     bases: Vec<String>,
-    has_unknown: bool,
+    unknown: Box<[String]>,
 }
 
 fn collect_class_base_types(class: &ast::Class, type_renderer: &TypeRenderer) -> RenderedBases {
     let mut bases = Vec::new();
-    let mut has_unknown = false;
+    let mut unknown = Vec::new();
 
     if let Some(extends) = &class.extends {
         let rendered = type_renderer.render(extends);
-        has_unknown |= rendered.has_unknown();
+        unknown.extend(rendered.unknown);
         bases.push(rendered.text);
     }
 
     for implemented in &class.implements {
         let rendered = type_renderer.render(implemented);
-        has_unknown |= rendered.has_unknown();
+        unknown.extend(rendered.unknown);
         bases.push(rendered.text);
     }
 
-    RenderedBases { bases, has_unknown }
+    RenderedBases {
+        bases,
+        unknown: unknown.into_boxed_slice(),
+    }
 }
 
 fn collect_interface_base_types(
@@ -668,28 +700,34 @@ fn collect_interface_base_types(
     type_renderer: &TypeRenderer,
 ) -> RenderedBases {
     let mut bases = Vec::new();
-    let mut has_unknown = false;
+    let mut unknown = Vec::new();
 
     for extend in &interface.extends {
         let rendered = type_renderer.render(extend);
-        has_unknown |= rendered.has_unknown();
+        unknown.extend(rendered.unknown);
         bases.push(rendered.text);
     }
 
-    RenderedBases { bases, has_unknown }
+    RenderedBases {
+        bases,
+        unknown: unknown.into_boxed_slice(),
+    }
 }
 
 fn collect_enum_base_types(r#enum: &ast::Enum, type_renderer: &TypeRenderer) -> RenderedBases {
     let mut bases = Vec::new();
-    let mut has_unknown = false;
+    let mut unknown = Vec::new();
 
     for implemented in &r#enum.implements {
         let rendered = type_renderer.render(implemented);
-        has_unknown |= rendered.has_unknown();
+        unknown.extend(rendered.unknown);
         bases.push(rendered.text);
     }
 
-    RenderedBases { bases, has_unknown }
+    RenderedBases {
+        bases,
+        unknown: unknown.into_boxed_slice(),
+    }
 }
 
 fn collect_type_params(roots: &[Rc<Root>]) -> BTreeSet<String> {
@@ -779,26 +817,26 @@ struct TypeRenderer {
 
 struct RenderedType {
     text: String,
-    has_unknown: bool,
+    unknown: Box<[String]>,
 }
 
 impl RenderedType {
     fn known(text: String) -> Self {
         Self {
             text,
-            has_unknown: false,
+            unknown: Box::from([]),
         }
     }
 
-    fn unknown(text: String) -> Self {
+    fn unknown(qty: &QualifiedType) -> Self {
         Self {
-            text,
-            has_unknown: true,
+            text: "Any".to_string(),
+            unknown: Box::from([qty.fmt()]),
         }
     }
 
     fn has_unknown(&self) -> bool {
-        self.has_unknown
+        self.unknown.len() > 0
     }
 }
 
@@ -816,19 +854,19 @@ impl TypeRenderer {
                     let rendered = self.render(bound);
                     RenderedType {
                         text: "Any".to_string(),
-                        has_unknown: rendered.has_unknown(),
+                        unknown: rendered.unknown,
                     }
                 }
             },
         }
     }
 
-    fn render(&self, ty: &QualifiedType) -> RenderedType {
-        let Some(last) = ty.last() else {
-            return RenderedType::unknown("Any".to_string());
+    fn render(&self, qty: &QualifiedType) -> RenderedType {
+        let Some(last) = qty.last() else {
+            return RenderedType::unknown(qty);
         };
 
-        let mut rendered = self.render_type(last);
+        let mut rendered = self.render_type(qty);
         if last.array_depth > 0 {
             for _ in 0..last.array_depth {
                 rendered.text = format!("list[{}]", rendered.text);
@@ -838,7 +876,9 @@ impl TypeRenderer {
         rendered
     }
 
-    fn render_type(&self, ty: &Type) -> RenderedType {
+    fn render_type(&self, qty: &QualifiedType) -> RenderedType {
+        let ty = qty.last().unwrap();
+
         match &ty.name {
             TypeName::Ident(ident) => {
                 let name_key = type_name_key(ident);
@@ -850,7 +890,7 @@ impl TypeRenderer {
                     return RenderedType::known(mapped);
                 }
 
-                RenderedType::unknown("Any".to_string())
+                RenderedType::unknown(qty)
             }
             TypeName::ResolvedGeneric(ident) => self.render_named_type(ident.clone(), &ty.generics),
             _ => {
@@ -865,12 +905,12 @@ impl TypeRenderer {
             return RenderedType::known(base);
         }
 
-        let mut has_unknown = false;
+        let mut unknown = Vec::new();
         let args = generics
             .iter()
             .map(|arg| {
                 let rendered = self.render_generic(arg);
-                has_unknown |= rendered.has_unknown();
+                unknown.extend(rendered.unknown);
                 rendered.text
             })
             .collect::<Vec<_>>()
@@ -878,7 +918,7 @@ impl TypeRenderer {
 
         RenderedType {
             text: format!("{}[{}]", base, args),
-            has_unknown,
+            unknown: unknown.into_boxed_slice(),
         }
     }
 
@@ -905,12 +945,12 @@ impl TypeRenderer {
         collection: CollectionKind,
         generics: &[TypeGeneric],
     ) -> RenderedType {
-        let mut has_unknown = false;
+        let mut unknown = Vec::new();
         let mut render_arg = |index: usize| -> String {
             let rendered = generics.get(index).map(|arg| self.render_generic(arg));
             match rendered {
                 Some(rendered) => {
-                    has_unknown |= rendered.has_unknown();
+                    unknown.extend(rendered.unknown);
                     rendered.text
                 }
                 None => "Any".to_string(),
@@ -923,7 +963,10 @@ impl TypeRenderer {
             CollectionKind::Map => format!("dict[{}, {}]", render_arg(0), render_arg(1)),
         };
 
-        RenderedType { text, has_unknown }
+        RenderedType {
+            text,
+            unknown: unknown.into_boxed_slice(),
+        }
     }
 }
 
