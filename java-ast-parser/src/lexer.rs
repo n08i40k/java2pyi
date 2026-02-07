@@ -12,8 +12,13 @@
 use logos::{Logos, Span};
 use ownable::IntoOwned;
 use std::{
-    borrow::Cow, cell::RefCell, collections::VecDeque, iter::Peekable, num::ParseIntError,
-    ops::DerefMut, rc::Rc,
+    borrow::Cow,
+    cell::RefCell,
+    collections::VecDeque,
+    iter::Peekable,
+    num::{ParseFloatError, ParseIntError},
+    ops::DerefMut,
+    rc::Rc,
 };
 
 /// Categories of lexical errors produced by [`Lexer`].
@@ -22,11 +27,18 @@ pub enum LexicalErrorKind {
     #[default]
     InvalidToken,
     InvalidInteger(ParseIntError),
+    InvalidFloat(ParseFloatError),
 }
 
 impl From<ParseIntError> for LexicalErrorKind {
     fn from(value: ParseIntError) -> Self {
         Self::InvalidInteger(value)
+    }
+}
+
+impl From<ParseFloatError> for LexicalErrorKind {
+    fn from(value: ParseFloatError) -> Self {
+        Self::InvalidFloat(value)
     }
 }
 
@@ -131,6 +143,12 @@ pub enum Token<'a> {
     #[token("false", |_| false)]
     Boolean(bool),
 
+    #[regex(r"-?[0-9]+\.[0-9]+[fF]", |lex| lex.slice()[..lex.slice().len() - 1].parse())]
+    Float(f32),
+
+    #[regex(r"-?[0-9]+\.[0-9]+", |lex| lex.slice().parse())]
+    Double(f64),
+
     #[regex(r"-?[0-9]+", |lex| lex.slice().parse())]
     #[regex(r"0x[0-9a-fA-F]{1,16}", |lex| u64::from_str_radix(&lex.slice()[2..], 16).map(|x| x as i64))]
     Integer(i64),
@@ -234,6 +252,7 @@ pub enum Token<'a> {
 
     #[token("record")]
     KeywordRecord,
+
     #[token("requires")]
     KeywordRequires,
 

@@ -182,6 +182,16 @@ impl<'a> std::fmt::Display for ErrorCell<'a> {
                         end.column,
                         &parse_int_error
                     )?,
+                    lexer::LexicalErrorKind::InvalidFloat(parse_float_error) => write!(
+                        f,
+                        "Invalid float '{}' from {}:{} to {}:{}: {}",
+                        &self.owner[error.span.start..error.span.end],
+                        start.row,
+                        start.column,
+                        end.row,
+                        end.column,
+                        &parse_float_error
+                    )?,
                 }
             }
         };
