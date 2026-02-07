@@ -26,13 +26,7 @@ cargo install
 git clone https://github.com/DrKLO/Telegram
 ```
 
-2. Replace `@interface` by `interface` in all files, only if you are want to convert code from repo provided in this example
-
-```
-find ./Telegram/TMessagesProj/src/main/java/ -type f \( -name '*.java' \) -exec sed -i 's/@interface/interface/g' {} +
-```
-
-3. Start generator
+2. Start generator
 
 ```
 java-to-pyi -i ./Telegram/TMessagesProj/src/main/java -o ./

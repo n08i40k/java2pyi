@@ -202,6 +202,7 @@ pub enum Token<'a> {
     KeywordInstanceof,
 
     #[token("interface")]
+    #[token("@interface")]
     KeywordInterface,
 
     #[token("module")]
