@@ -1,7 +1,7 @@
 use std::{collections::HashMap, fs, ops::Deref, path::Path, rc::Rc};
 
 use java_ast_parser::ast::{self, ClassCell, EnumCell, InterfaceCell, Type, TypeGeneric, TypeName};
-use log::warn;
+use log::debug;
 
 use crate::index_tree::{GlobalIndexTree, ImportedIndexTree, LocalIndexTree, PackageIndexTree};
 
@@ -53,7 +53,7 @@ fn resolve_qualified_type(
 
     let Some(type_cell) = local_index_tree.search(scope, r#type) else {
         if let TypeName::Ident(_) = r#type.last().unwrap().name {
-            warn!(
+            debug!(
                 "Failed to resolve type `{}`.",
                 r#type
                     .iter()
