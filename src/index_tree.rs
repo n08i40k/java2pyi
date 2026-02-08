@@ -15,6 +15,22 @@ pub enum TreeNode {
     Interface(InterfaceCell),
 }
 
+#[derive(Debug, Clone)]
+pub enum ResolvedType {
+    Class(ClassCell),
+    Interface(InterfaceCell),
+}
+
+impl ResolvedType {
+    fn from_node(node: &TreeNode) -> Option<Self> {
+        match node {
+            TreeNode::Class(class_cell) => Some(Self::Class(class_cell.clone())),
+            TreeNode::Interface(interface_cell) => Some(Self::Interface(interface_cell.clone())),
+            _ => None,
+        }
+    }
+}
+
 impl TreeNode {
     pub fn ident(&self) -> Option<&'_ str> {
         match self {
@@ -292,7 +308,7 @@ impl<'a> FromIterator<&'a PackageIndexTree> for GlobalIndexTree {
 }
 
 impl GlobalIndexTree {
-    pub fn search(&self, query: &ast::QualifiedType) -> Option<ClassCell> {
+    pub fn search(&self, query: &ast::QualifiedType) -> Option<ResolvedType> {
         let mut current_idx = self.0.root().idx();
 
         for query_part in query {
@@ -311,11 +327,7 @@ impl GlobalIndexTree {
             current_idx = node_idx;
         }
 
-        if let TreeNode::Class(class_cell) = self.0.node(current_idx).data() {
-            Some(class_cell.clone())
-        } else {
-            None
-        }
+        ResolvedType::from_node(self.0.node(current_idx).data())
     }
 }
 
@@ -377,7 +389,7 @@ impl ImportedIndexTree {
         Self::from(tree)
     }
 
-    pub fn search(&self, query: &ast::QualifiedType) -> Option<ClassCell> {
+    pub fn search(&self, query: &ast::QualifiedType) -> Option<ResolvedType> {
         let mut current_idx = self.0.root().idx();
 
         for query_part in query {
@@ -396,11 +408,7 @@ impl ImportedIndexTree {
             current_idx = node_idx;
         }
 
-        if let TreeNode::Class(class_cell) = self.0.node(current_idx).data() {
-            Some(class_cell.clone())
-        } else {
-            None
-        }
+        ResolvedType::from_node(self.0.node(current_idx).data())
     }
 }
 
@@ -432,11 +440,11 @@ impl LocalIndexTree {
         }
     }
 
-    pub fn search_global(&self, query: &ast::QualifiedType) -> Option<ClassCell> {
+    pub fn search_global(&self, query: &ast::QualifiedType) -> Option<ResolvedType> {
         self.global.search(query)
     }
 
-    pub fn search_imported(&self, query: &ast::QualifiedType) -> Option<ClassCell> {
+    pub fn search_imported(&self, query: &ast::QualifiedType) -> Option<ResolvedType> {
         self.imported.search(query)
     }
 
@@ -444,7 +452,7 @@ impl LocalIndexTree {
         &self,
         scope: Option<&ClassCell>,
         query: &ast::QualifiedType,
-    ) -> Option<ClassCell> {
+    ) -> Option<ResolvedType> {
         let root_idx = scope
             .and_then(|x| self.reverse_local.get(x))
             .cloned()
@@ -486,18 +494,14 @@ impl LocalIndexTree {
             current_idx = node_idx;
         }
 
-        if let TreeNode::Class(class_cell) = self.local.node(current_idx).data() {
-            Some(class_cell.clone())
-        } else {
-            try_parent()
-        }
+        ResolvedType::from_node(self.local.node(current_idx).data()).or_else(try_parent)
     }
 
     pub fn search(
         &self,
         scope: Option<&ClassCell>,
         query: &ast::QualifiedType,
-    ) -> Option<ClassCell> {
+    ) -> Option<ResolvedType> {
         self.search_local(scope, query)
             .or_else(|| self.search_imported(query))
             .or_else(|| self.search_global(query))

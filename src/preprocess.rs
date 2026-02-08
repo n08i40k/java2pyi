@@ -3,7 +3,9 @@ use std::{collections::HashMap, fs, ops::Deref, path::Path, rc::Rc};
 use java_ast_parser::ast::{self, ClassCell, EnumCell, InterfaceCell, TypeGeneric, TypeName};
 use log::debug;
 
-use crate::index_tree::{GlobalIndexTree, ImportedIndexTree, LocalIndexTree, PackageIndexTree};
+use crate::index_tree::{
+    GlobalIndexTree, ImportedIndexTree, LocalIndexTree, PackageIndexTree, ResolvedType,
+};
 use crate::status;
 
 /// Parse ast and convert it to owned ("disconnect" from string).
@@ -39,7 +41,7 @@ fn resolve_qualified_type(
         }
     }
 
-    let Some(type_cell) = local_index_tree.search(scope, r#type) else {
+    let Some(resolved) = local_index_tree.search(scope, r#type) else {
         if let TypeName::Ident(_) = r#type.last().unwrap().name {
             debug!(
                 "Failed to resolve type `{}`.",
@@ -54,7 +56,10 @@ fn resolve_qualified_type(
         return;
     };
 
-    r#type.last_mut().unwrap().name = ast::TypeName::ResolvedClass(type_cell.clone());
+    r#type.last_mut().unwrap().name = match resolved {
+        ResolvedType::Class(class_cell) => ast::TypeName::ResolvedClass(class_cell),
+        ResolvedType::Interface(interface_cell) => ast::TypeName::ResolvedInterface(interface_cell),
+    };
 }
 
 /// ChildPtr -> ParentPtr
@@ -68,6 +73,10 @@ fn resolve_class_type_names<'a, T: IntoIterator<Item = &'a (ClassCell, &'a Local
 
         if let Some(extends) = &mut class.extends {
             resolve_qualified_type(&generics, extends, Some(class_cell), local_index_tree);
+        }
+
+        for implement in &mut class.implements {
+            resolve_qualified_type(&generics, implement, Some(class_cell), local_index_tree);
         }
 
         for variable in &mut class.variables {

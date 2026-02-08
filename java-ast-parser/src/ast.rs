@@ -102,6 +102,7 @@ pub enum TypeName {
     Ident(String),
     ResolvedGeneric(String),
     ResolvedClass(ClassCell),
+    ResolvedInterface(InterfaceCell),
 }
 
 impl std::fmt::Debug for TypeName {
@@ -120,6 +121,10 @@ impl std::fmt::Debug for TypeName {
             Self::ResolvedGeneric(arg0) => f.debug_tuple("ResolvedGeneric").field(arg0).finish(),
             Self::ResolvedClass(arg0) => f
                 .debug_tuple("ResolvedIdent")
+                .field(&arg0.borrow().ident)
+                .finish(),
+            Self::ResolvedInterface(arg0) => f
+                .debug_tuple("ResolvedInterface")
                 .field(&arg0.borrow().ident)
                 .finish(),
         }
@@ -141,6 +146,7 @@ impl std::fmt::Display for TypeName {
             TypeName::Ident(ident) => write!(f, "{}", ident),
             TypeName::ResolvedGeneric(ident) => write!(f, "{}", ident),
             TypeName::ResolvedClass(class_cell) => write!(f, "{}", class_cell.ident()),
+            TypeName::ResolvedInterface(interface_cell) => write!(f, "{}", interface_cell.ident()),
         }
     }
 }

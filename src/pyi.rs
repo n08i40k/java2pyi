@@ -48,8 +48,11 @@ pub fn generate_pyi_by_package(roots: &[Rc<Root>]) -> HashMap<String, String> {
             label
         ));
         let module_imports = collect_module_imports(&package_roots, &definition_paths);
-        let mut emitter =
-            PyiEmitter::new(class_paths.clone(), definition_paths.clone(), module_imports);
+        let mut emitter = PyiEmitter::new(
+            class_paths.clone(),
+            definition_paths.clone(),
+            module_imports,
+        );
 
         emitter.emit_header();
 
@@ -89,7 +92,10 @@ impl PyiEmitter {
         Self {
             output: String::new(),
             indent: 0,
-            type_renderer: TypeRenderer::new(class_paths),
+            type_renderer: TypeRenderer::new(
+                class_paths,
+                Rc::new(definition_paths.interface_paths.clone()),
+            ),
             definition_paths,
             module_imports,
         }
@@ -547,6 +553,18 @@ fn collect_module_imports(
         }
     }
 
+    fn add_interface_module(
+        modules: &mut BTreeSet<String>,
+        definition_paths: &DefinitionPaths,
+        interface_cell: &InterfaceCell,
+    ) {
+        if let Some(module_path) = definition_paths.interface_module(interface_cell)
+            && !module_path.is_empty()
+        {
+            modules.insert(module_path.to_string());
+        }
+    }
+
     fn collect_from_generic(
         generic: &TypeGeneric,
         definition_paths: &DefinitionPaths,
@@ -569,8 +587,14 @@ fn collect_module_imports(
         modules: &mut BTreeSet<String>,
     ) {
         for part in r#type {
-            if let TypeName::ResolvedClass(class_cell) = &part.name {
-                add_module(modules, definition_paths, class_cell);
+            match &part.name {
+                TypeName::ResolvedClass(class_cell) => {
+                    add_module(modules, definition_paths, class_cell);
+                }
+                TypeName::ResolvedInterface(interface_cell) => {
+                    add_interface_module(modules, definition_paths, interface_cell);
+                }
+                _ => {}
             }
 
             for generic in &part.generics {
@@ -795,6 +819,7 @@ fn format_type_params(generics: &[ast::GenericDefinition]) -> String {
 
 struct TypeRenderer {
     class_paths: Rc<HashMap<ClassCell, String>>,
+    interface_paths: Rc<HashMap<InterfaceCell, String>>,
 }
 
 struct RenderedType {
@@ -823,8 +848,14 @@ impl RenderedType {
 }
 
 impl TypeRenderer {
-    fn new(class_paths: Rc<HashMap<ClassCell, String>>) -> Self {
-        Self { class_paths }
+    fn new(
+        class_paths: Rc<HashMap<ClassCell, String>>,
+        interface_paths: Rc<HashMap<InterfaceCell, String>>,
+    ) -> Self {
+        Self {
+            class_paths,
+            interface_paths,
+        }
     }
 
     fn render_generic(&self, ty_gen: &TypeGeneric, type_params: &BTreeSet<String>) -> RenderedType {
@@ -919,6 +950,11 @@ impl TypeRenderer {
                 .get(class_cell)
                 .cloned()
                 .unwrap_or_else(|| class_cell.borrow().ident.clone()),
+            TypeName::ResolvedInterface(interface_cell) => self
+                .interface_paths
+                .get(interface_cell)
+                .cloned()
+                .unwrap_or_else(|| interface_cell.borrow().ident.clone()),
             TypeName::ResolvedGeneric(ident) => ident.clone(),
             TypeName::Ident(ident) => ident.clone(),
         }
@@ -931,6 +967,7 @@ fn collect_definition_paths(roots: &[Rc<Root>]) -> DefinitionPaths {
         class_modules: HashMap::new(),
         enum_paths: HashMap::new(),
         interface_paths: HashMap::new(),
+        interface_modules: HashMap::new(),
     };
 
     fn walk_class(
@@ -985,6 +1022,14 @@ fn collect_definition_paths(roots: &[Rc<Root>]) -> DefinitionPaths {
         paths
             .interface_paths
             .insert(interface_cell.clone(), interface_path.clone());
+
+        if let Some(module_path) = module_path
+            && !module_path.is_empty()
+        {
+            paths
+                .interface_modules
+                .insert(interface_cell.clone(), module_path.to_string());
+        }
 
         for nested in &interface.classes {
             walk_class(paths, nested, Some(&interface_path), module_path);
@@ -1053,6 +1098,7 @@ struct DefinitionPaths {
     class_modules: HashMap<ClassCell, String>,
     enum_paths: HashMap<EnumCell, String>,
     interface_paths: HashMap<InterfaceCell, String>,
+    interface_modules: HashMap<InterfaceCell, String>,
 }
 
 impl DefinitionPaths {
@@ -1066,6 +1112,12 @@ impl DefinitionPaths {
     fn class_module(&self, class_cell: &ClassCell) -> Option<&str> {
         self.class_modules
             .get(class_cell)
+            .map(|module| module.as_str())
+    }
+
+    fn interface_module(&self, interface_cell: &InterfaceCell) -> Option<&str> {
+        self.interface_modules
+            .get(interface_cell)
             .map(|module| module.as_str())
     }
 
