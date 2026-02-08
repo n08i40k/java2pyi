@@ -4,11 +4,11 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-lalrpop-util = "*"
-logos = "*"
+lalrpop-util = "0.22.2"
+logos = "0.16.1"
 ownable = "1.0.0"
 bitflags = "2.10.0"
 itertools = "0.14.0"
 
 [build-dependencies]
-lalrpop = "*"
+lalrpop = "0.22.2"

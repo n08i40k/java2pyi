@@ -2,9 +2,15 @@
 members = [".", "java-ast-parser"]
 
 [package]
-name = "java-to-pyi"
+name = "java2pyi"
 version = "0.1.0"
 edition = "2024"
+license = "MIT"
+keywords = ["java", "ast", "parser", "codegen"]
+categories = ["command-line-utilities"]
+description = "Java source to Python stubs for mypy/pyright"
+repository = "https://github.com/n08i40k/java2pyi"
+readme = "README.md"
 
 [dependencies]
 java-ast-parser = { path = "./java-ast-parser/" }

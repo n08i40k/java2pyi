@@ -204,7 +204,7 @@ fn parse_args(args: Vec<String>) -> Result<CliOptions, String> {
 fn usage() -> String {
     [
         "Usage:",
-        "  java-to-pyi -i <path> [-i <path> ...] [-x <path> ...] [--out <dir>]",
+        "  java2pyi -i <path> [-i <path> ...] [-x <path> ...] [--out <dir>]",
         "",
         "Options:",
         "  -i, --input <path>      Input file or directory (recurses for .java)",
