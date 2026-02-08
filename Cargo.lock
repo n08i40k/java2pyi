@@ -293,7 +293,7 @@ dependencies = [
 
 [[package]]
 name = "java2pyi"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "env_logger",
  "java-ast-parser",
