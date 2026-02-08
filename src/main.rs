@@ -35,7 +35,7 @@ fn main() {
         }
     };
 
-    let files = match collect_java_files(&options.inputs) {
+    let files = match collect_java_files(&options.inputs, &options.excludes) {
         Ok(files) => files,
         Err(message) => {
             eprintln!("{}", message);
@@ -148,11 +148,13 @@ fn ensure_parent_inits(file_path: &Path, out_dir: &Path) -> std::io::Result<()> 
 struct CliOptions {
     inputs: Vec<PathBuf>,
     out_dir: PathBuf,
+    excludes: Vec<PathBuf>,
 }
 
 fn parse_args(args: Vec<String>) -> Result<CliOptions, String> {
     let mut inputs = Vec::new();
     let mut out_dir = PathBuf::from("out");
+    let mut excludes = Vec::new();
     let mut iter = args.into_iter();
     let _program = iter.next();
 
@@ -170,6 +172,12 @@ fn parse_args(args: Vec<String>) -> Result<CliOptions, String> {
                     .ok_or_else(|| "missing value for --out".to_string())?;
                 out_dir = PathBuf::from(value);
             }
+            "-x" | "--exclude" => {
+                let value = iter
+                    .next()
+                    .ok_or_else(|| "missing value for --exclude".to_string())?;
+                excludes.push(PathBuf::from(value));
+            }
             "-h" | "--help" => {
                 return Err(String::from("help requested"));
             }
@@ -186,26 +194,34 @@ fn parse_args(args: Vec<String>) -> Result<CliOptions, String> {
         return Err(String::from("no inputs provided"));
     }
 
-    Ok(CliOptions { inputs, out_dir })
+    Ok(CliOptions {
+        inputs,
+        out_dir,
+        excludes,
+    })
 }
 
 fn usage() -> String {
     [
         "Usage:",
-        "  java-to-pyi -i <path> [-i <path> ...] [--out <dir>]",
+        "  java-to-pyi -i <path> [-i <path> ...] [-x <path> ...] [--out <dir>]",
         "",
         "Options:",
         "  -i, --input <path>      Input file or directory (recurses for .java)",
+        "  -x, --exclude <path>    Exclude file or directory (repeatable)",
         "  -o, --out <dir>         Output directory (default: out)",
         "  -h, --help              Show this help",
     ]
     .join("\n")
 }
 
-fn collect_java_files(inputs: &[PathBuf]) -> Result<Vec<PathBuf>, String> {
+fn collect_java_files(inputs: &[PathBuf], excludes: &[PathBuf]) -> Result<Vec<PathBuf>, String> {
     let mut files = Vec::new();
 
     for input in inputs {
+        if is_excluded(input, excludes) {
+            continue;
+        }
         let metadata = fs::metadata(input)
             .map_err(|err| format!("failed to read {}: {}", input.display(), err))?;
 
@@ -214,25 +230,32 @@ fn collect_java_files(inputs: &[PathBuf]) -> Result<Vec<PathBuf>, String> {
                 files.push(input.clone());
             }
         } else if metadata.is_dir() {
-            collect_java_files_in_dir(input, &mut files)?;
+            collect_java_files_in_dir(input, &mut files, excludes)?;
         }
     }
 
     Ok(files)
 }
 
-fn collect_java_files_in_dir(dir: &Path, files: &mut Vec<PathBuf>) -> Result<(), String> {
+fn collect_java_files_in_dir(
+    dir: &Path,
+    files: &mut Vec<PathBuf>,
+    excludes: &[PathBuf],
+) -> Result<(), String> {
     for entry in
         fs::read_dir(dir).map_err(|err| format!("failed to read {}: {}", dir.display(), err))?
     {
         let entry = entry.map_err(|err| format!("failed to read {}: {}", dir.display(), err))?;
         let path = entry.path();
+        if is_excluded(&path, excludes) {
+            continue;
+        }
         let metadata = entry
             .metadata()
             .map_err(|err| format!("failed to read {}: {}", path.display(), err))?;
 
         if metadata.is_dir() {
-            collect_java_files_in_dir(&path, files)?;
+            collect_java_files_in_dir(&path, files, excludes)?;
         } else if metadata.is_file() && is_java_file(&path) {
             files.push(path);
         }
@@ -243,4 +266,8 @@ fn collect_java_files_in_dir(dir: &Path, files: &mut Vec<PathBuf>) -> Result<(),
 
 fn is_java_file(path: &Path) -> bool {
     path.extension().and_then(|ext| ext.to_str()) == Some("java")
+}
+
+fn is_excluded(path: &Path, excludes: &[PathBuf]) -> bool {
+    excludes.iter().any(|exclude| path.starts_with(exclude))
 }
