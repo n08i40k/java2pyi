@@ -15,7 +15,7 @@ git clone https://github.com/n08i40k/java-to-pyi
 2. Compile and install
 
 ```
-cargo install
+cargo install --path .
 ```
 
 ## Usage example
