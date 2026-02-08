@@ -103,6 +103,9 @@ UnsafeIdent: Cow<'input, str> = {
   "module" => Cow::from("module"),
   "this" => Cow::from("this"),
   "record" => Cow::from("record"),
+  "exports" => Cow::from("exports"),
+  "requires" => Cow::from("requires"),
+  "permits" => Cow::from("permits"),
 };
 
 #[inline]
@@ -210,7 +213,7 @@ FunctionArgument: ast::FunctionArgument
 FunctionEnd: () = { "{" "}", ";" };
 
 Function: ast::Function
-  = <m:Modifiers> <g:GenericDefinitions?> <rt:QualifiedType> <i:Ident?> "(" <args:CommaList<FunctionArgument>?> ")" ("throws" CommaList<QualifiedType>)? FunctionEnd
+  = <m:Modifiers> <g:GenericDefinitions?> <rt:QualifiedType> <i:UnsafeIdent?> "(" <args:CommaList<FunctionArgument>?> ")" ("throws" CommaList<QualifiedType>)? FunctionEnd
   => ast::Function {
     modifiers: m,
     generics: g.unwrap_or(Box::from([])),
