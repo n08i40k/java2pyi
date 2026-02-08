@@ -1,11 +1,11 @@
 use std::collections::{BTreeSet, HashMap};
 use std::rc::Rc;
 
+use crate::status;
 use java_ast_parser::ast::{
     self, ClassCell, EnumCell, Function, InterfaceCell, Modifiers, QualifiedType, Root,
     TypeGeneric, TypeName, WildcardBoundary,
 };
-use crate::status;
 
 trait QualifiedTypeFormat {
     fn fmt(&self) -> String;
@@ -120,7 +120,11 @@ impl PyiEmitter {
             collect_class_base_types(&class, &self.type_renderer, &class_type_params);
         let mut inserted_special_base = false;
         if let Some(special_base) = java_stdlib_python_base(&class_path, &class.generics) {
-            if !rendered_bases.bases.iter().any(|base| base == &special_base) {
+            if !rendered_bases
+                .bases
+                .iter()
+                .any(|base| base == &special_base)
+            {
                 rendered_bases.bases.insert(0, special_base);
                 inserted_special_base = true;
             }
@@ -139,7 +143,10 @@ impl PyiEmitter {
             format!("({})", rendered_bases.bases.join(", "))
         };
 
-        let mut line = format!("class {}{}{}:", class.ident, type_params_suffix, bases_suffix);
+        let mut line = format!(
+            "class {}{}{}:",
+            class.ident, type_params_suffix, bases_suffix
+        );
         if !rendered_bases.unknown.is_empty() {
             line.push_str(&format!(
                 "  # unknown type(s) [{}] used in {}",
@@ -151,7 +158,10 @@ impl PyiEmitter {
         self.indent += 1;
 
         let mut has_members = false;
-        let has_explicit_init = class.functions.iter().any(|function| function.ident == "__init__");
+        let has_explicit_init = class
+            .functions
+            .iter()
+            .any(|function| function.ident == "__init__");
         if !has_explicit_init {
             has_members = true;
             self.line("def __init__(self, *args: Any, **kwargs: Any) -> None: ...".to_string());
@@ -159,7 +169,9 @@ impl PyiEmitter {
 
         for variable in &class.variables {
             has_members = true;
-            let rendered = self.type_renderer.render(&variable.r#type, &class_type_params);
+            let rendered = self
+                .type_renderer
+                .render(&variable.r#type, &class_type_params);
             let ident = sanitize_ident(&variable.ident);
             let mut line = format!("{}: {}", ident, rendered.text);
             if rendered.has_unknown() {
@@ -175,26 +187,12 @@ impl PyiEmitter {
 
         let function_groups = group_functions(&class.functions);
         for function_group in function_groups {
-            let filtered = function_group
-                .into_iter()
-                .filter(|function| {
-                    function.ident == "__ctor" || !function.modifiers.intersects(Modifiers::STATIC)
-                })
-                .collect::<Vec<_>>();
-            if filtered.is_empty() {
-                continue;
-            }
-            let use_overload = filtered.len() > 1;
-            for function in filtered {
+            let use_overload = function_group.len() > 1;
+            for function in function_group {
                 has_members = true;
                 let function_type_params =
                     extend_type_params(&class_type_params, &function.generics);
-                self.emit_function(
-                    function,
-                    use_overload,
-                    &class_path,
-                    &function_type_params,
-                );
+                self.emit_function(function, use_overload, &class_path, &function_type_params);
             }
         }
 
@@ -228,13 +226,14 @@ impl PyiEmitter {
         let interface_type_params = extend_type_params(outer_type_params, &interface.generics);
         let type_params_suffix = format_type_params(&interface.generics);
         let interface_path = self.definition_paths.interface_path(interface_cell);
-        let mut rendered_bases = collect_interface_base_types(
-            &interface,
-            &self.type_renderer,
-            &interface_type_params,
-        );
+        let mut rendered_bases =
+            collect_interface_base_types(&interface, &self.type_renderer, &interface_type_params);
         if let Some(special_base) = java_stdlib_python_base(&interface_path, &interface.generics) {
-            if !rendered_bases.bases.iter().any(|base| base == &special_base) {
+            if !rendered_bases
+                .bases
+                .iter()
+                .any(|base| base == &special_base)
+            {
                 rendered_bases.bases.insert(0, special_base);
             }
         }
@@ -244,8 +243,10 @@ impl PyiEmitter {
             format!("({})", rendered_bases.bases.join(", "))
         };
 
-        let mut line =
-            format!("class {}{}{}:", interface.ident, type_params_suffix, bases_suffix);
+        let mut line = format!(
+            "class {}{}{}:",
+            interface.ident, type_params_suffix, bases_suffix
+        );
         if !rendered_bases.unknown.is_empty() {
             line.push_str(&format!(
                 "  # unknown type(s) [{}] used in {}",
@@ -278,17 +279,8 @@ impl PyiEmitter {
 
         let function_groups = group_functions(&interface.functions);
         for function_group in function_groups {
-            let filtered = function_group
-                .into_iter()
-                .filter(|function| {
-                    function.ident == "__ctor" || !function.modifiers.intersects(Modifiers::STATIC)
-                })
-                .collect::<Vec<_>>();
-            if filtered.is_empty() {
-                continue;
-            }
-            let use_overload = filtered.len() > 1;
-            for function in filtered {
+            let use_overload = function_group.len() > 1;
+            for function in function_group {
                 has_members = true;
                 let function_type_params =
                     extend_type_params(&interface_type_params, &function.generics);
@@ -336,7 +328,10 @@ impl PyiEmitter {
             format!("({})", bases.join(", "))
         };
 
-        let mut line = format!("class {}{}{}:", r#enum.ident, type_params_suffix, bases_suffix);
+        let mut line = format!(
+            "class {}{}{}:",
+            r#enum.ident, type_params_suffix, bases_suffix
+        );
         if !rendered_bases.unknown.is_empty() {
             line.push_str(&format!(
                 "  # unknown type(s) [{}] used in {}",
@@ -351,7 +346,9 @@ impl PyiEmitter {
 
         for variable in &r#enum.variables {
             has_members = true;
-            let rendered = self.type_renderer.render(&variable.r#type, &enum_type_params);
+            let rendered = self
+                .type_renderer
+                .render(&variable.r#type, &enum_type_params);
             let ident = sanitize_ident(&variable.ident);
             let mut line = format!("{}: {}", ident, rendered.text);
             if rendered.has_unknown() {
@@ -367,19 +364,11 @@ impl PyiEmitter {
 
         let function_groups = group_functions(&r#enum.functions);
         for function_group in function_groups {
-            let filtered = function_group
-                .into_iter()
-                .filter(|function| {
-                    function.ident == "__ctor" || !function.modifiers.intersects(Modifiers::STATIC)
-                })
-                .collect::<Vec<_>>();
-            if filtered.is_empty() {
-                continue;
-            }
-            let use_overload = filtered.len() > 1;
-            for function in filtered {
+            let use_overload = function_group.len() > 1;
+            for function in function_group {
                 has_members = true;
-                let function_type_params = extend_type_params(&enum_type_params, &function.generics);
+                let function_type_params =
+                    extend_type_params(&enum_type_params, &function.generics);
                 self.emit_function(function, use_overload, &enum_path, &function_type_params);
             }
         }
@@ -441,7 +430,9 @@ impl PyiEmitter {
             }
         }
 
-        let rendered_return = self.type_renderer.render(&function.return_type, type_params);
+        let rendered_return = self
+            .type_renderer
+            .render(&function.return_type, type_params);
         if rendered_return.has_unknown() {
             unknown_paths.insert(
                 format!("{}.{}", class_path, function.ident),
