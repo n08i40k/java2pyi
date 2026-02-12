@@ -787,7 +787,11 @@ fn collect_class_base_types(
     if let Some(extends) = &class.extends {
         let rendered = type_renderer.render(extends, type_params);
         unknown.extend(rendered.unknown);
-        bases.push(rendered.text);
+        if unknown.is_empty() {
+            bases.push(rendered.text);
+        } else {
+            bases.push("java.lang.Object".to_string());
+        }
     }
 
     for implemented in &class.implements {
