@@ -645,6 +645,7 @@ pub(super) enum InterfaceEntry {
     Class(Class),
     Enum(Enum),
     Interface(Interface),
+    Skip,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -708,6 +709,7 @@ impl
                     InterfaceEntry::Class(c) => classes.push(c),
                     InterfaceEntry::Enum(e) => enums.push(e),
                     InterfaceEntry::Interface(i) => interfaces.push(i),
+                    InterfaceEntry::Skip => {}
                 }
             }
         }

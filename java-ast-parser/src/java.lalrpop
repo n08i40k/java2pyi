@@ -228,6 +228,8 @@ InterfaceEntry: ast::InterfaceEntry = {
   <c:Class> => ast::InterfaceEntry::Class(c),
   <e:Enum> => ast::InterfaceEntry::Enum(e),
   <i:Interface> => ast::InterfaceEntry::Interface(i),
+  "static"? "{" "}" => ast::InterfaceEntry::Skip,
+  Modifiers RecordCtor "{" "}" => ast::InterfaceEntry::Skip,
 };
 
 #[inline]
