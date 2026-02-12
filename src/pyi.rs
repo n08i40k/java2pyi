@@ -405,6 +405,8 @@ impl PyiEmitter {
             self.line("@overload".to_string());
         }
 
+        let is_object_get_class = class_path == "java.lang.Object" && function.ident == "getClass";
+
         let is_static =
             function.ident == "__ctor" || function.modifiers.intersects(Modifiers::STATIC);
         if is_static {
@@ -413,7 +415,11 @@ impl PyiEmitter {
 
         let mut args = Vec::new();
         if !is_static {
-            args.push("self".to_string());
+            if is_object_get_class {
+                args.push("self = None".to_string());
+            } else {
+                args.push("self".to_string());
+            }
         }
 
         let mut unknown_paths = HashMap::new();
