@@ -9,11 +9,11 @@ description = "A Java parser that produces a typed AST without initializers and 
 repository = "https://github.com/n08i40k/java2pyi"
 
 [dependencies]
-lalrpop-util = "0.22.2"
+lalrpop-util = "0.23.1"
 logos = "0.16.1"
 ownable = "1.0.0"
 bitflags = "2.10.0"
 itertools = "0.14.0"
 
 [build-dependencies]
-lalrpop = "0.22.2"
+lalrpop = "0.23.1"
