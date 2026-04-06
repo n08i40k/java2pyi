@@ -1,7 +1,7 @@
 use java_ast_parser::ast::{self, ClassCell, EnumCell, GetIdent, InterfaceCell, Root};
 use orx_tree::{Bfs, Dyn, DynTree, NodeIdx, NodeRef};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     ops::{Deref, DerefMut},
     rc::Rc,
 };
@@ -89,6 +89,12 @@ impl From<&EnumCell> for TreeNode {
     }
 }
 pub type IndexTree = DynTree<TreeNode>;
+
+#[derive(Debug, Clone)]
+pub struct SharedLocalIndex {
+    tree: Rc<IndexTree>,
+    reverse_local: Rc<HashMap<ClassCell, NodeIdx<Dyn<TreeNode>>>>,
+}
 
 #[derive(Debug, Clone)]
 pub struct PackageIndexTree {
@@ -252,6 +258,24 @@ impl PackageIndexTree {
 
         merge_index_trees(&mut self.inner, self_idx, &other.inner, other_idx);
     }
+
+    pub fn shared_local_index(&self) -> SharedLocalIndex {
+        let tree = Rc::new(self.inner.clone());
+        let mut reverse_local = HashMap::new();
+
+        for idx in tree.root().indices::<Bfs>() {
+            let TreeNode::Class(class_cell) = tree.node(idx).data() else {
+                continue;
+            };
+
+            reverse_local.insert(class_cell.clone(), idx);
+        }
+
+        SharedLocalIndex {
+            tree,
+            reverse_local: Rc::new(reverse_local),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -308,14 +332,13 @@ impl<'a> FromIterator<&'a PackageIndexTree> for GlobalIndexTree {
 }
 
 impl GlobalIndexTree {
-    pub fn search(&self, query: &ast::QualifiedType) -> Option<ResolvedType> {
+    pub fn search_path<'a, I>(&self, query: I) -> Option<ResolvedType>
+    where
+        I: IntoIterator<Item = &'a str>,
+    {
         let mut current_idx = self.0.root().idx();
 
-        for query_part in query {
-            let ast::TypeName::Ident(ident) = &query_part.name else {
-                return None;
-            };
-
+        for ident in query {
             let node_idx = self.0.node(current_idx).children().find_map(|x| {
                 if x.data().ident().is_some_and(|x| x == ident) {
                     Some(x.idx())
@@ -328,87 +351,92 @@ impl GlobalIndexTree {
         }
 
         ResolvedType::from_node(self.0.node(current_idx).data())
+    }
+
+    pub fn search(&self, query: &ast::QualifiedType) -> Option<ResolvedType> {
+        let parts = query
+            .iter()
+            .map(|query_part| {
+                let ast::TypeName::Ident(ident) = &query_part.name else {
+                    return None;
+                };
+
+                Some(ident.as_str())
+            })
+            .collect::<Option<Vec<_>>>()?;
+
+        self.search_path(parts)
     }
 }
 
 #[derive(Debug, Clone)]
-pub struct ImportedIndexTree(IndexTree);
-
-impl From<IndexTree> for ImportedIndexTree {
-    fn from(value: IndexTree) -> Self {
-        Self(value)
-    }
+pub struct ImportedIndexTree {
+    global: Rc<GlobalIndexTree>,
+    imports: Box<[String]>,
 }
 
 impl ImportedIndexTree {
-    pub fn from_imports<'a, I>(import_iter: I, global_index_tree: &GlobalIndexTree) -> Self
+    pub fn from_imports<'a, I>(import_iter: I, global_index_tree: Rc<GlobalIndexTree>) -> Self
     where
         I: IntoIterator<Item = &'a str>,
     {
-        let mut tree = IndexTree::new(TreeNode::Root);
-
+        let mut seen = HashSet::new();
+        let mut imports = Vec::new();
         for import in import_iter {
-            let mut current_idx = global_index_tree.root().idx();
-            let mut terminated = false;
-
-            for import_part in import.split('.') {
-                if import_part == "*" {
-                    let mut root_mut = tree.root_mut();
-
-                    for child in global_index_tree.node(current_idx).children() {
-                        root_mut.push_child_tree(child.as_cloned_subtree());
-                    }
-                }
-
-                let Some(node_idx) = global_index_tree
-                    .node(current_idx)
-                    .children()
-                    .find_map(|x| {
-                        if x.data().ident().is_some_and(|x| x == import_part) {
-                            Some(x.idx())
-                        } else {
-                            None
-                        }
-                    })
-                else {
-                    terminated = true;
-                    break;
-                };
-
-                current_idx = node_idx;
+            let import = import.to_string();
+            if seen.insert(import.clone()) {
+                imports.push(import);
             }
-
-            if terminated {
-                continue;
-            }
-
-            tree.root_mut()
-                .push_child_tree(global_index_tree.node(current_idx).as_cloned_subtree());
         }
 
-        Self::from(tree)
+        Self {
+            global: global_index_tree,
+            imports: imports.into_boxed_slice(),
+        }
     }
 
     pub fn search(&self, query: &ast::QualifiedType) -> Option<ResolvedType> {
-        let mut current_idx = self.0.root().idx();
+        let query_parts = query
+            .iter()
+            .map(|query_part| {
+                let ast::TypeName::Ident(ident) = &query_part.name else {
+                    return None;
+                };
 
-        for query_part in query {
-            let ast::TypeName::Ident(ident) = &query_part.name else {
-                return None;
-            };
+                Some(ident.as_str())
+            })
+            .collect::<Option<Vec<_>>>()?;
 
-            let node_idx = self.0.node(current_idx).children().find_map(|x| {
-                if x.data().ident().is_some_and(|x| x == ident) {
-                    Some(x.idx())
-                } else {
-                    None
+        for import in &self.imports {
+            if let Some(prefix) = import.strip_suffix(".*") {
+                let resolved = self
+                    .global
+                    .search_path(prefix.split('.').chain(query_parts.iter().copied()));
+
+                if resolved.is_some() {
+                    return resolved;
                 }
-            })?;
+                continue;
+            }
 
-            current_idx = node_idx;
+            let import_parts = import.split('.').collect::<Vec<_>>();
+            if import_parts.last().copied() != query_parts.first().copied() {
+                continue;
+            }
+
+            let resolved = self.global.search_path(
+                import_parts[..import_parts.len().saturating_sub(1)]
+                    .iter()
+                    .copied()
+                    .chain(query_parts.iter().copied()),
+            );
+
+            if resolved.is_some() {
+                return resolved;
+            }
         }
 
-        ResolvedType::from_node(self.0.node(current_idx).data())
+        None
     }
 }
 
@@ -416,27 +444,21 @@ impl ImportedIndexTree {
 pub struct LocalIndexTree {
     global: Rc<GlobalIndexTree>,
     imported: ImportedIndexTree,
-    local: IndexTree,
-    reverse_local: HashMap<ClassCell, NodeIdx<Dyn<TreeNode>>>,
+    local: Rc<IndexTree>,
+    reverse_local: Rc<HashMap<ClassCell, NodeIdx<Dyn<TreeNode>>>>,
 }
 
 impl LocalIndexTree {
-    pub fn new(global: Rc<GlobalIndexTree>, imported: ImportedIndexTree, local: IndexTree) -> Self {
-        let mut reverse_local = HashMap::new();
-
-        for idx in local.root().indices::<Bfs>() {
-            let TreeNode::Class(class_cell) = local.node(idx).data() else {
-                continue;
-            };
-
-            reverse_local.insert(class_cell.clone(), idx);
-        }
-
+    pub fn new(
+        global: Rc<GlobalIndexTree>,
+        imported: ImportedIndexTree,
+        shared_local: SharedLocalIndex,
+    ) -> Self {
         Self {
             global,
             imported,
-            local,
-            reverse_local,
+            local: shared_local.tree,
+            reverse_local: shared_local.reverse_local,
         }
     }
 

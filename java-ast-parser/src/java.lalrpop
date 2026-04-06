@@ -103,6 +103,8 @@ UnsafeIdent: Cow<'input, str> = {
   "module" => Cow::from("module"),
   "this" => Cow::from("this"),
   "record" => Cow::from("record"),
+  "sealed" => Cow::from("sealed"),
+  "var" => Cow::from("var"),
   "exports" => Cow::from("exports"),
   "requires" => Cow::from("requires"),
   "permits" => Cow::from("permits"),
@@ -124,11 +126,11 @@ MayBeTrailingCommaList<T>: Box<[T]> = {
 AmpersandList<T>: Box<[T]> = <first:T> <mut rest:("&" <T>)*> => { rest.insert(0, first); rest.into_boxed_slice() };
 PeriodList<T>: Box<[T]> = <first:T> <mut rest:("." <T>)*> => { rest.insert(0, first); rest.into_boxed_slice() };
 
-Package: Cow<'input, str> = "package" <p:Path> ";" => p;
+Package: Cow<'input, str> = "package" <p:Path> ";"+ => p;
 
 #[inline]
 ImportPath: Cow<'input, str> = <l:@L> UnsafeIdent ("." UnsafeIdent)* ("." "*")? <r:@R> => Cow::from(&input[l..r]);
-Import: Cow<'input, str> = "import" "static"? <p:ImportPath> ";" => p;
+Import: Cow<'input, str> = "import" "static"? <p:ImportPath> ";"+ => p;
 
 Modifier: ast::Modifiers = {
   "public" => ast::Modifiers::PUBLIC,
@@ -212,15 +214,20 @@ FunctionArgument: ast::FunctionArgument
 #[inline]
 FunctionEnd: () = { "{" "}", ";" };
 
+#[inline]
+FunctionReturnArraySuffix: usize = <a:("[" "]")*> => a.len();
+
 Function: ast::Function
-  = <m:Modifiers> <g:GenericDefinitions?> <rt:QualifiedType> <i:UnsafeIdent?> "(" <args:CommaList<FunctionArgument>?> ")" ("throws" CommaList<QualifiedType>)? FunctionEnd
-  => ast::Function {
+  = <m:Modifiers> <g:GenericDefinitions?> <mut rt:QualifiedType> <i:UnsafeIdent?> "(" <args:CommaList<FunctionArgument>?> ")" <a:FunctionReturnArraySuffix> ("throws" CommaList<QualifiedType>)? FunctionEnd
+  => {
+    rt.last_mut().unwrap().array_depth += a;
+    ast::Function {
     modifiers: m,
     generics: g.unwrap_or(Box::from([])),
     return_type: rt,
     ident: i.unwrap_or_else(|| Cow::from("__ctor")).to_string(),
     arguments: args.unwrap_or(Box::from([]))
-  };
+  }};
 
 InterfaceEntry: ast::InterfaceEntry = {
   <v:Variables> => ast::InterfaceEntry::Variables(v),

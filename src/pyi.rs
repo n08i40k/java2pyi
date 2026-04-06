@@ -1,4 +1,4 @@
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::rc::Rc;
 
 use crate::status;
@@ -95,6 +95,15 @@ impl PyiEmitter {
             type_renderer: TypeRenderer::new(
                 class_paths,
                 Rc::new(definition_paths.interface_paths.clone()),
+                Rc::new(
+                    definition_paths
+                        .class_paths
+                        .values()
+                        .chain(definition_paths.interface_paths.values())
+                        .chain(definition_paths.enum_paths.values())
+                        .cloned()
+                        .collect(),
+                ),
             ),
             definition_paths,
             module_imports,
@@ -171,7 +180,7 @@ impl PyiEmitter {
             has_members = true;
             let rendered = self
                 .type_renderer
-                .render(&variable.r#type, &class_type_params);
+                .render_in_scope(&class_path, &variable.r#type, &class_type_params);
             let ident = sanitize_ident(&variable.ident);
             let mut line = format!("{}: {}", ident, rendered.text);
             if rendered.has_unknown() {
@@ -263,7 +272,7 @@ impl PyiEmitter {
             has_members = true;
             let rendered = self
                 .type_renderer
-                .render(&variable.r#type, &interface_type_params);
+                .render_in_scope(&interface_path, &variable.r#type, &interface_type_params);
             let ident = sanitize_ident(&variable.ident);
             let mut line = format!("{}: {}", ident, rendered.text);
             if rendered.has_unknown() {
@@ -348,7 +357,7 @@ impl PyiEmitter {
             has_members = true;
             let rendered = self
                 .type_renderer
-                .render(&variable.r#type, &enum_type_params);
+                .render_in_scope(&enum_path, &variable.r#type, &enum_type_params);
             let ident = sanitize_ident(&variable.ident);
             let mut line = format!("{}: {}", ident, rendered.text);
             if rendered.has_unknown() {
@@ -424,7 +433,9 @@ impl PyiEmitter {
 
         let mut unknown_paths = HashMap::new();
         for argument in &function.arguments {
-            let rendered = self.type_renderer.render(&argument.r#type, type_params);
+            let rendered = self
+                .type_renderer
+                .render_in_scope(class_path, &argument.r#type, type_params);
             let arg_prefix = if argument.vararg { "*" } else { "" };
             let ident = sanitize_ident(&argument.ident);
             args.push(format!("{}{}: {}", arg_prefix, ident, rendered.text));
@@ -436,9 +447,13 @@ impl PyiEmitter {
             }
         }
 
-        let rendered_return = self
-            .type_renderer
-            .render(&function.return_type, type_params);
+        let rendered_return = if function.ident == "__ctor" {
+            self.type_renderer
+                .render_constructor_return(class_path, &function.return_type, type_params)
+        } else {
+            self.type_renderer
+                .render_in_scope(class_path, &function.return_type, type_params)
+        };
         if rendered_return.has_unknown() {
             unknown_paths.insert(
                 format!("{}.{}", class_path, function.ident),
@@ -873,6 +888,7 @@ fn format_type_params(generics: &[ast::GenericDefinition]) -> String {
 struct TypeRenderer {
     class_paths: Rc<HashMap<ClassCell, String>>,
     interface_paths: Rc<HashMap<InterfaceCell, String>>,
+    known_paths: Rc<HashSet<String>>,
 }
 
 struct RenderedType {
@@ -904,10 +920,12 @@ impl TypeRenderer {
     fn new(
         class_paths: Rc<HashMap<ClassCell, String>>,
         interface_paths: Rc<HashMap<InterfaceCell, String>>,
+        known_paths: Rc<HashSet<String>>,
     ) -> Self {
         Self {
             class_paths,
             interface_paths,
+            known_paths,
         }
     }
 
@@ -933,6 +951,64 @@ impl TypeRenderer {
         };
 
         let mut rendered = self.render_type(qty, type_params);
+        if last.array_depth > 0 {
+            for _ in 0..last.array_depth {
+                rendered.text = format!("list[{}]", rendered.text);
+            }
+        }
+
+        rendered
+    }
+
+    fn render_in_scope(
+        &self,
+        scope_path: &str,
+        qty: &QualifiedType,
+        type_params: &BTreeSet<String>,
+    ) -> RenderedType {
+        let rendered = self.render(qty, type_params);
+        if !rendered.has_unknown() {
+            return rendered;
+        }
+
+        let Some(ty) = qty.last() else {
+            return rendered;
+        };
+
+        let TypeName::Ident(ident) = &ty.name else {
+            return rendered;
+        };
+
+        if qty.len() != 1 || type_params.contains(ident) {
+            return rendered;
+        }
+
+        let candidate = format!("{}.{}", scope_path, ident);
+        if !self.known_paths.contains(&candidate) {
+            return rendered;
+        }
+
+        let mut nested = self.render_named_type(candidate, &ty.generics, type_params);
+        if ty.array_depth > 0 {
+            for _ in 0..ty.array_depth {
+                nested.text = format!("list[{}]", nested.text);
+            }
+        }
+
+        nested
+    }
+
+    fn render_constructor_return(
+        &self,
+        class_path: &str,
+        qty: &QualifiedType,
+        type_params: &BTreeSet<String>,
+    ) -> RenderedType {
+        let Some(last) = qty.last() else {
+            return RenderedType::known(class_path.to_string());
+        };
+
+        let mut rendered = self.render_named_type(class_path.to_string(), &last.generics, type_params);
         if last.array_depth > 0 {
             for _ in 0..last.array_depth {
                 rendered.text = format!("list[{}]", rendered.text);

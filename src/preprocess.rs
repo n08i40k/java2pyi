@@ -1,4 +1,4 @@
-use std::{collections::HashMap, fs, ops::Deref, path::Path, rc::Rc};
+use std::{collections::HashMap, fs, path::Path, rc::Rc};
 
 use java_ast_parser::ast::{self, ClassCell, EnumCell, InterfaceCell, TypeGeneric, TypeName};
 use log::debug;
@@ -462,6 +462,10 @@ impl Scope {
         };
 
         let global_index_tree = Rc::new(GlobalIndexTree::from_iter(package_index_trees.values()));
+        let shared_package_indices = package_index_trees
+            .iter()
+            .map(|(package, index_tree)| (package.clone(), index_tree.shared_local_index()))
+            .collect::<HashMap<_, _>>();
 
         let mut scopes = Vec::with_capacity(roots.len());
         for (index, root) in roots.iter().enumerate() {
@@ -478,16 +482,16 @@ impl Scope {
             ));
             let imported_index_tree = ImportedIndexTree::from_imports(
                 root.imports.iter().map(|x| x.as_str()),
-                &global_index_tree,
-            );
-
-            let package_index_tree = package_index_trees.get(root.package.as_str()).unwrap();
-
-            let local_index_tree = LocalIndexTree::new(
                 global_index_tree.clone(),
-                imported_index_tree,
-                Clone::clone(package_index_tree.deref()),
             );
+
+            let shared_local_index = shared_package_indices
+                .get(root.package.as_str())
+                .unwrap()
+                .clone();
+
+            let local_index_tree =
+                LocalIndexTree::new(global_index_tree.clone(), imported_index_tree, shared_local_index);
 
             scopes.push(Scope {
                 ast: root.clone(),

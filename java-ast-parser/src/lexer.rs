@@ -56,13 +56,18 @@ fn string_from_lexer<'a>(lex: &mut logos::Lexer<'a, Token<'a>>) -> Cow<'a, str> 
     Cow::from(&slice[1..slice.len() - 1])
 }
 
+fn text_block_from_lexer<'a>(lex: &mut logos::Lexer<'a, Token<'a>>) -> Cow<'a, str> {
+    let slice = lex.slice();
+    Cow::from(&slice[3..slice.len() - 3])
+}
+
 /// Token kinds produced by the lexer.
 #[derive(Clone, Debug, PartialEq, Logos, IntoOwned)]
 #[logos(error = LexicalErrorKind)]
 #[logos(skip r"[\s\t\n\f]+")]
 #[logos(skip(r"//.*", allow_greedy = true))]
 #[logos(skip(
-    r"@[A-Za-z0-9.]+(?:\((?:[^()]|\((?:[^()]|\((?:[^()]|\((?:[^()]|\([^()]*\))*\))*\))*\))*\))?"
+    r"@[\p{L}_\$][\p{L}\p{Nd}_\$]*(?:\s*\.\s*[\p{L}_\$][\p{L}\p{Nd}_\$]*)*(?:\s*\((?:[^()]|\((?:[^()]|\((?:[^()]|\((?:[^()]|\([^()]*\))*\))*\))*\))*\))?"
 ))]
 #[logos(skip r"\/\*[^*]*\*+(?:[^\/*][^*]*\*+)*\/")]
 pub enum Token<'a> {
@@ -338,6 +343,7 @@ pub enum Token<'a> {
     )]
     CharLiteral(Cow<'a, str>),
 
+    #[regex(r#"(?s)""".*?""""#, text_block_from_lexer)]
     #[regex(r#""([^"\\]*(?:\\.[^"\\]*)*)""#, string_from_lexer)]
     String(Cow<'a, str>),
 
@@ -565,43 +571,88 @@ impl<'input> Iterator for Lexer<'input> {
                     }
                 }
                 Token::ClosePth => {
+                    let close_span = span.clone();
+
                     let Some((Ok(Token::KeywordDefault), _)) = self.inner.peek() else {
-                        return Some(Ok((span.start, tok, span.end)));
+                        return Some(Ok((close_span.start, tok, close_span.end)));
                     };
 
-                    let mut expr_level = 0;
+                    let mut brace_level = 0;
+                    let mut pth_level = 0;
+                    let mut bracket_level = 0;
 
                     loop {
-                        if let Some((Ok(Token::Semicolon), _)) = self.inner.peek() {
-                            return Some(Ok((span.start, tok, span.end)));
-                        }
+                        let (peek_tok, peek_span) = self.inner.next()?;
 
-                        let (tok, span) = self.inner.next()?;
+                        match peek_tok {
+                            Ok(_tok) => {}
+                            Err(kind) => {
+                                return Some(Err(LexicalError {
+                                    kind,
+                                    span: peek_span,
+                                }));
+                            }
+                        };
+
+                        let (tok, span) = self.inner.peek()?;
 
                         let tok = match tok {
                             Ok(tok) => tok,
                             Err(kind) => {
-                                return Some(Err(LexicalError { kind, span }));
+                                return Some(Err(LexicalError {
+                                    kind: kind.clone(),
+                                    span: span.clone(),
+                                }));
                             }
                         };
 
                         match &tok {
                             Token::OpenBrace => {
-                                expr_level += 1;
+                                brace_level += 1;
                             }
                             Token::CloseBrace => {
-                                if expr_level == 0 {
+                                if brace_level == 0 {
                                     return Some(Err(LexicalError {
                                         kind: LexicalErrorKind::InvalidToken,
-                                        span,
+                                        span: span.clone(),
                                     }));
                                 }
 
-                                expr_level -= 1;
+                                brace_level -= 1;
+                            }
+                            Token::OpenPth => {
+                                pth_level += 1;
+                            }
+                            Token::ClosePth => {
+                                if pth_level == 0 {
+                                    return Some(Err(LexicalError {
+                                        kind: LexicalErrorKind::InvalidToken,
+                                        span: span.clone(),
+                                    }));
+                                }
+
+                                pth_level -= 1;
+                            }
+                            Token::OpenBracket => {
+                                bracket_level += 1;
+                            }
+                            Token::CloseBracket => {
+                                if bracket_level == 0 {
+                                    return Some(Err(LexicalError {
+                                        kind: LexicalErrorKind::InvalidToken,
+                                        span: span.clone(),
+                                    }));
+                                }
+
+                                bracket_level -= 1;
                             }
                             Token::Semicolon => {
-                                if expr_level == 0 {
-                                    return Some(Ok((span.start, tok, span.end)));
+                                if brace_level == 0 && pth_level == 0 && bracket_level == 0 {
+                                    return Some(Ok((
+                                        close_span.start,
+                                        Token::ClosePth,
+                                        close_span.end,
+                                    )));
                                 }
                             }
                             _ => {}
