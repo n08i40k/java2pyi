@@ -3,7 +3,15 @@
 use std::{
     env, fs,
     path::{Path, PathBuf},
-    rc::Rc,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
+};
+
+use rayon::{
+    ThreadPoolBuilder,
+    iter::{IndexedParallelIterator, IntoParallelRefIterator, ParallelIterator},
 };
 
 use crate::preprocess::{parse_java_ast, preprocess_asts};
@@ -13,6 +21,8 @@ mod index_tree;
 mod preprocess;
 mod pyi;
 mod status;
+
+const DEFAULT_RAYON_STACK_SIZE_MB: usize = 8;
 
 fn main() {
     if std::env::var("RUST_LOG").is_err() {
@@ -51,31 +61,57 @@ fn main() {
 
     let total_files = files.len();
     status::update(&format!("Parsing 0/{}", total_files));
-    let mut asts = Vec::new();
-    for (index, file) in files.iter().enumerate() {
-        let display_name = file
-            .file_name()
-            .and_then(|name| name.to_str())
-            .map(str::to_string)
-            .unwrap_or_else(|| file.to_string_lossy().to_string());
-        status::update(&format!(
-            "Parsing {}/{}: {}",
-            index + 1,
-            total_files,
-            display_name
-        ));
-        match parse_java_ast(file) {
-            Ok(ast) => asts.push(Rc::new(ast)),
-            Err(e) => match &e.inner {
-                java_ast_parser::Error::UnrecognizedEof { .. } => {}
-                _ => {
+    let worker_pool = ThreadPoolBuilder::new()
+        .stack_size(rayon_stack_size())
+        .build()
+        .unwrap();
+
+    let asts = {
+        let mut result = Vec::new();
+
+        let parse_results = worker_pool.install(|| {
+            files
+                .par_iter()
+                .enumerate()
+                .map(|(index, file)| {
+                    let display_name = file
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .map(str::to_string)
+                        .unwrap_or_else(|| file.to_string_lossy().to_string());
+
+                    status::update(&format!(
+                        "Parsing {}/{}: {}",
+                        index + 1,
+                        total_files,
+                        display_name
+                    ));
+
+                    match parse_java_ast(file) {
+                        Ok(ast) => Ok(Some(Arc::new(ast))),
+                        Err(e) => match &e.inner {
+                            java_ast_parser::Error::UnrecognizedEof { .. } => Ok(None),
+                            _ => Err((file.display().to_string(), e.to_string())),
+                        },
+                    }
+                })
+                .collect::<Vec<_>>()
+        });
+
+        for parse_result in parse_results {
+            match parse_result {
+                Ok(Some(ast)) => result.push(ast),
+                Ok(None) => {}
+                Err((path, error)) => {
                     status::clear();
-                    eprintln!("failed to parse {}\n{}", file.display(), e);
+                    eprintln!("failed to parse {}\n{}", path, error);
                     return;
                 }
-            },
+            }
         }
-    }
+
+        result
+    };
 
     if asts.is_empty() {
         status::clear();
@@ -83,32 +119,62 @@ fn main() {
         return;
     }
 
-    preprocess_asts(&asts);
+    worker_pool.install(|| preprocess_asts(&asts));
 
-    let outputs = generate_pyi_by_package(&asts);
+    let outputs = worker_pool.install(|| generate_pyi_by_package(&asts));
+    let output_items = outputs.into_iter().collect::<Vec<_>>();
 
-    let total_outputs = outputs.len();
+    let total_outputs = output_items.len();
     status::update(&format!("Writing 0/{}", total_outputs));
-    for (index, (package, contents)) in outputs.into_iter().enumerate() {
-        let label = if package.is_empty() {
-            "<root>"
-        } else {
-            package.as_str()
-        };
-        status::update(&format!(
-            "Writing {}/{}: {}",
-            index + 1,
-            total_outputs,
-            label
-        ));
-        let file_path = package_to_path(&options.out_dir, &package);
-        if let Some(parent) = file_path.parent() {
-            fs::create_dir_all(parent).unwrap();
+    let write_progress = AtomicUsize::new(0);
+    let write_results = worker_pool.install(|| {
+        output_items
+            .par_iter()
+            .map(|(package, contents)| {
+                let file_path = package_to_path(&options.out_dir, package);
+                if let Some(parent) = file_path.parent() {
+                    fs::create_dir_all(parent)
+                        .map_err(|error| (file_path.display().to_string(), error.to_string()))?;
+                }
+                fs::write(&file_path, contents)
+                    .map_err(|error| (file_path.display().to_string(), error.to_string()))?;
+                ensure_parent_inits(&file_path, &options.out_dir)
+                    .map_err(|error| (file_path.display().to_string(), error.to_string()))?;
+
+                let completed = write_progress.fetch_add(1, Ordering::Relaxed) + 1;
+                let label = if package.is_empty() {
+                    "<root>"
+                } else {
+                    package.as_str()
+                };
+                status::update(&format!(
+                    "Writing {}/{}: {}",
+                    completed, total_outputs, label
+                ));
+
+                Ok::<(), (String, String)>(())
+            })
+            .collect::<Vec<_>>()
+    });
+
+    for write_result in write_results {
+        if let Err((path, error)) = write_result {
+            status::clear();
+            eprintln!("failed to write {}\n{}", path, error);
+            return;
         }
-        fs::write(&file_path, contents).unwrap();
-        ensure_parent_inits(&file_path, &options.out_dir).unwrap();
     }
     status::clear();
+}
+
+fn rayon_stack_size() -> usize {
+    let configured_mb = env::var("JAVA2PYI_RAYON_STACK_SIZE_MB")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(DEFAULT_RAYON_STACK_SIZE_MB);
+
+    configured_mb.saturating_mul(1024 * 1024)
 }
 
 fn package_to_path(out_dir: &Path, package: &str) -> PathBuf {

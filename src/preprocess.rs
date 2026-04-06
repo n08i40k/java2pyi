@@ -1,7 +1,18 @@
-use std::{collections::HashMap, fs, path::Path, rc::Rc};
+use std::{
+    collections::HashMap,
+    fs,
+    path::Path,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
+};
 
-use java_ast_parser::ast::{self, ClassCell, EnumCell, InterfaceCell, TypeGeneric, TypeName};
+use java_ast_parser::ast::{
+    self, ClassCell, EnumCell, GetIdent, InterfaceCell, TypeGeneric, TypeName,
+};
 use log::debug;
+use rayon::prelude::{IntoParallelRefIterator, ParallelIterator};
 
 use crate::index_tree::{
     GlobalIndexTree, ImportedIndexTree, LocalIndexTree, PackageIndexTree, ResolvedType,
@@ -63,10 +74,12 @@ fn resolve_qualified_type(
 }
 
 /// ChildPtr -> ParentPtr
-fn resolve_class_type_names<'a, T: IntoIterator<Item = &'a (ClassCell, &'a LocalIndexTree)>>(
-    iter: T,
+fn resolve_class_type_names(
+    items: &[(ClassCell, &LocalIndexTree)],
+    progress: &AtomicUsize,
+    total: usize,
 ) {
-    for (class_cell, local_index_tree) in iter {
+    items.par_iter().for_each(|(class_cell, local_index_tree)| {
         let mut class = class_cell.borrow_mut();
 
         let generics = collect_generic_names(&class.generics);
@@ -113,54 +126,59 @@ fn resolve_class_type_names<'a, T: IntoIterator<Item = &'a (ClassCell, &'a Local
                 );
             }
         }
-    }
+        update_parallel_progress("Resolving", progress, total, class_cell.ident());
+    });
 }
 
-fn resolve_interface_type_names<
-    'a,
-    T: IntoIterator<Item = &'a (InterfaceCell, &'a LocalIndexTree)>,
->(
-    iter: T,
+fn resolve_interface_type_names(
+    items: &[(InterfaceCell, &LocalIndexTree)],
+    progress: &AtomicUsize,
+    total: usize,
 ) {
-    for (interface_cell, local_index_tree) in iter {
-        let mut interface = interface_cell.borrow_mut();
-        let generics = collect_generic_names(&interface.generics);
+    items
+        .par_iter()
+        .for_each(|(interface_cell, local_index_tree)| {
+            let mut interface = interface_cell.borrow_mut();
+            let generics = collect_generic_names(&interface.generics);
 
-        for extend in &mut interface.extends {
-            resolve_qualified_type(&generics, extend, None, local_index_tree);
-        }
+            for extend in &mut interface.extends {
+                resolve_qualified_type(&generics, extend, None, local_index_tree);
+            }
 
-        for variable in &mut interface.variables {
-            resolve_qualified_type(&generics, &mut variable.r#type, None, local_index_tree);
-        }
+            for variable in &mut interface.variables {
+                resolve_qualified_type(&generics, &mut variable.r#type, None, local_index_tree);
+            }
 
-        for function in &mut interface.functions {
-            let mut function_generics = generics.clone();
-            function_generics.extend(collect_generic_names(&function.generics));
+            for function in &mut interface.functions {
+                let mut function_generics = generics.clone();
+                function_generics.extend(collect_generic_names(&function.generics));
 
-            resolve_qualified_type(
-                &function_generics,
-                &mut function.return_type,
-                None,
-                local_index_tree,
-            );
-
-            for argument in &mut function.arguments {
                 resolve_qualified_type(
                     &function_generics,
-                    &mut argument.r#type,
+                    &mut function.return_type,
                     None,
                     local_index_tree,
                 );
+
+                for argument in &mut function.arguments {
+                    resolve_qualified_type(
+                        &function_generics,
+                        &mut argument.r#type,
+                        None,
+                        local_index_tree,
+                    );
+                }
             }
-        }
-    }
+            update_parallel_progress("Resolving", progress, total, interface_cell.ident());
+        });
 }
 
-fn resolve_enum_type_names<'a, T: IntoIterator<Item = &'a (EnumCell, &'a LocalIndexTree)>>(
-    iter: T,
+fn resolve_enum_type_names(
+    items: &[(EnumCell, &LocalIndexTree)],
+    progress: &AtomicUsize,
+    total: usize,
 ) {
-    for (enum_cell, local_index_tree) in iter {
+    items.par_iter().for_each(|(enum_cell, local_index_tree)| {
         let mut r#enum = enum_cell.borrow_mut();
         let generics = collect_generic_names(&r#enum.generics);
 
@@ -192,7 +210,8 @@ fn resolve_enum_type_names<'a, T: IntoIterator<Item = &'a (EnumCell, &'a LocalIn
                 );
             }
         }
-    }
+        update_parallel_progress("Resolving", progress, total, enum_cell.ident());
+    });
 }
 
 fn collect_scoped_classes<'a, T: IntoIterator<Item = &'a Scope>>(
@@ -435,18 +454,24 @@ fn collect_generic_names(generics: &[ast::GenericDefinition]) -> Vec<String> {
 
 #[derive(Debug)]
 pub struct Scope {
-    pub ast: Rc<ast::Root>,
+    pub ast: Arc<ast::Root>,
     pub local_index_tree: LocalIndexTree,
 }
 
 impl Scope {
-    pub fn from_roots(roots: &[Rc<ast::Root>]) -> Box<[Self]> {
-        status::update(&format!("Indexing 0/{}", roots.len()));
+    pub fn from_roots(roots: &[Arc<ast::Root>]) -> Box<[Self]> {
+        status::update(&format!("Indexing Trees 0/{}", roots.len()));
         let package_index_trees = {
+            let progress = AtomicUsize::new(0);
             let package_index_trees = roots
-                .iter()
-                .map(|x| PackageIndexTree::from_ast(x))
-                .collect::<Box<[_]>>();
+                .par_iter()
+                .map(|root| {
+                    let tree = PackageIndexTree::from_ast(root);
+                    let label = package_label(&root.package);
+                    update_parallel_progress("Indexing Trees", &progress, roots.len(), label);
+                    tree
+                })
+                .collect::<Vec<_>>();
 
             let mut groups: HashMap<String, PackageIndexTree> = HashMap::new();
 
@@ -461,56 +486,74 @@ impl Scope {
             groups
         };
 
-        let global_index_tree = Rc::new(GlobalIndexTree::from_iter(package_index_trees.values()));
+        let global_index_tree = Arc::new(GlobalIndexTree::from_iter(package_index_trees.values()));
         let shared_package_indices = package_index_trees
             .iter()
             .map(|(package, index_tree)| (package.clone(), index_tree.shared_local_index()))
             .collect::<HashMap<_, _>>();
 
-        let mut scopes = Vec::with_capacity(roots.len());
-        for (index, root) in roots.iter().enumerate() {
-            let label = if root.package.is_empty() {
-                "<root>"
-            } else {
-                root.package.as_str()
-            };
-            status::update(&format!(
-                "Indexing {}/{}: {}",
-                index + 1,
-                roots.len(),
-                label
-            ));
-            let imported_index_tree = ImportedIndexTree::from_imports(
-                root.imports.iter().map(|x| x.as_str()),
-                global_index_tree.clone(),
-            );
+        status::update(&format!("Indexing Scopes 0/{}", roots.len()));
+        let progress = AtomicUsize::new(0);
+        roots
+            .par_iter()
+            .map(|root| {
+                let imported_index_tree = ImportedIndexTree::from_imports(
+                    root.imports.iter().map(|x| x.as_str()),
+                    global_index_tree.clone(),
+                );
 
-            let shared_local_index = shared_package_indices
-                .get(root.package.as_str())
-                .unwrap()
-                .clone();
+                let shared_local_index = shared_package_indices
+                    .get(root.package.as_str())
+                    .unwrap()
+                    .clone();
 
-            let local_index_tree =
-                LocalIndexTree::new(global_index_tree.clone(), imported_index_tree, shared_local_index);
+                let local_index_tree = LocalIndexTree::new(
+                    global_index_tree.clone(),
+                    imported_index_tree,
+                    shared_local_index,
+                );
 
-            scopes.push(Scope {
-                ast: root.clone(),
-                local_index_tree,
-            });
-        }
+                let label = package_label(&root.package);
+                update_parallel_progress("Indexing Scopes", &progress, roots.len(), label);
 
-        scopes.into_boxed_slice()
+                Scope {
+                    ast: root.clone(),
+                    local_index_tree,
+                }
+            })
+            .collect::<Vec<_>>()
+            .into_boxed_slice()
     }
 }
 
-pub fn preprocess_asts(roots: &[Rc<ast::Root>]) {
+pub fn preprocess_asts(roots: &[Arc<ast::Root>]) {
     let scopes = Scope::from_roots(roots);
 
     let scoped_classes = collect_scoped_classes(&scopes);
     let scoped_interfaces = collect_scoped_interfaces(&scopes);
     let scoped_enums = collect_scoped_enums(&scopes);
 
-    resolve_class_type_names(&scoped_classes);
-    resolve_interface_type_names(&scoped_interfaces);
-    resolve_enum_type_names(&scoped_enums);
+    let total = scoped_classes.len() + scoped_interfaces.len() + scoped_enums.len();
+    if total == 0 {
+        return;
+    }
+
+    status::update(&format!("Resolving 0/{}", total));
+    let progress = AtomicUsize::new(0);
+    resolve_class_type_names(&scoped_classes, &progress, total);
+    resolve_interface_type_names(&scoped_interfaces, &progress, total);
+    resolve_enum_type_names(&scoped_enums, &progress, total);
+}
+
+fn package_label(package: &str) -> &str {
+    if package.is_empty() {
+        "<root>"
+    } else {
+        package
+    }
+}
+
+fn update_parallel_progress(stage: &str, progress: &AtomicUsize, total: usize, label: &str) {
+    let completed = progress.fetch_add(1, Ordering::Relaxed) + 1;
+    status::update(&format!("{} {}/{}: {}", stage, completed, total, label));
 }

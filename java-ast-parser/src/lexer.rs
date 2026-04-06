@@ -14,11 +14,10 @@ use logos::{Logos, Span, SpannedIter};
 use ownable::IntoOwned;
 use std::{
     borrow::Cow,
-    cell::RefCell,
     collections::VecDeque,
     num::{ParseFloatError, ParseIntError},
     ops::{DerefMut, Range},
-    rc::Rc,
+    sync::{Arc, Mutex},
 };
 
 use crate::java;
@@ -373,7 +372,7 @@ enum Scope {
 pub struct Lexer<'input> {
     input: &'input str,
     inner: MultiPeek<logos::SpannedIter<'input, Token<'input>>>,
-    scope_stack: VecDeque<Rc<RefCell<Scope>>>,
+    scope_stack: VecDeque<Arc<Mutex<Scope>>>,
 }
 
 impl<'input> Lexer<'input> {
@@ -381,7 +380,7 @@ impl<'input> Lexer<'input> {
         Self {
             input: src,
             inner: Token::lexer(src).spanned().multipeek(),
-            scope_stack: VecDeque::from([Rc::from(RefCell::from(Scope::Root))]),
+            scope_stack: VecDeque::from([Arc::from(Mutex::from(Scope::Root))]),
         }
     }
 }
@@ -486,7 +485,7 @@ impl<'input> Iterator for Lexer<'input> {
 
         let current_scope = self.scope_stack.back().unwrap().clone();
 
-        match current_scope.borrow_mut().deref_mut() {
+        match current_scope.lock().unwrap().deref_mut() {
             Scope::Root => match &tok {
                 Token::KeywordClass
                 | Token::KeywordInterface
@@ -500,7 +499,7 @@ impl<'input> Iterator for Lexer<'input> {
                     }
 
                     self.scope_stack
-                        .push_back(Rc::from(RefCell::from(Scope::Object {
+                        .push_back(Arc::from(Mutex::from(Scope::Object {
                             skip_pths: tok == Token::KeywordEnum,
                             in_body: false,
                             is_record: matches!(tok, Token::KeywordRecord),
@@ -527,7 +526,7 @@ impl<'input> Iterator for Lexer<'input> {
                     }
 
                     self.scope_stack
-                        .push_back(Rc::from(RefCell::from(Scope::Object {
+                        .push_back(Arc::from(Mutex::from(Scope::Object {
                             skip_pths: tok == Token::KeywordEnum,
                             in_body: false,
                             is_record: matches!(tok, Token::KeywordRecord),
@@ -548,7 +547,7 @@ impl<'input> Iterator for Lexer<'input> {
                 Token::OpenPth => {
                     if *skip_pths {
                         self.scope_stack
-                            .push_back(Rc::from(RefCell::from(Scope::EnumVariant)));
+                            .push_back(Arc::from(Mutex::from(Scope::EnumVariant)));
                     }
                 }
                 Token::Semicolon => {
@@ -563,7 +562,7 @@ impl<'input> Iterator for Lexer<'input> {
                     }
 
                     self.scope_stack
-                        .push_back(Rc::from(RefCell::from(Scope::Function)));
+                        .push_back(Arc::from(Mutex::from(Scope::Function)));
                 }
                 Token::CloseBrace => {
                     if *in_body {

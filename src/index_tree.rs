@@ -3,13 +3,13 @@ use orx_tree::{Bfs, Dyn, DynTree, NodeIdx, NodeRef};
 use std::{
     collections::{HashMap, HashSet},
     ops::{Deref, DerefMut},
-    rc::Rc,
+    sync::Arc,
 };
 
 #[derive(Debug, Clone)]
 pub enum TreeNode {
     Root,
-    Package(Rc<String>),
+    Package(Arc<String>),
     Class(ClassCell),
     Enum(EnumCell),
     Interface(InterfaceCell),
@@ -67,7 +67,7 @@ impl std::cmp::Eq for TreeNode {}
 
 impl From<&str> for TreeNode {
     fn from(value: &str) -> Self {
-        Self::Package(Rc::from(value.to_string()))
+        Self::Package(Arc::from(value.to_string()))
     }
 }
 
@@ -92,8 +92,8 @@ pub type IndexTree = DynTree<TreeNode>;
 
 #[derive(Debug, Clone)]
 pub struct SharedLocalIndex {
-    tree: Rc<IndexTree>,
-    reverse_local: Rc<HashMap<ClassCell, NodeIdx<Dyn<TreeNode>>>>,
+    tree: Arc<IndexTree>,
+    reverse_local: Arc<HashMap<ClassCell, NodeIdx<Dyn<TreeNode>>>>,
 }
 
 #[derive(Debug, Clone)]
@@ -260,7 +260,7 @@ impl PackageIndexTree {
     }
 
     pub fn shared_local_index(&self) -> SharedLocalIndex {
-        let tree = Rc::new(self.inner.clone());
+        let tree = Arc::new(self.inner.clone());
         let mut reverse_local = HashMap::new();
 
         for idx in tree.root().indices::<Bfs>() {
@@ -273,7 +273,7 @@ impl PackageIndexTree {
 
         SharedLocalIndex {
             tree,
-            reverse_local: Rc::new(reverse_local),
+            reverse_local: Arc::new(reverse_local),
         }
     }
 }
@@ -371,12 +371,12 @@ impl GlobalIndexTree {
 
 #[derive(Debug, Clone)]
 pub struct ImportedIndexTree {
-    global: Rc<GlobalIndexTree>,
+    global: Arc<GlobalIndexTree>,
     imports: Box<[String]>,
 }
 
 impl ImportedIndexTree {
-    pub fn from_imports<'a, I>(import_iter: I, global_index_tree: Rc<GlobalIndexTree>) -> Self
+    pub fn from_imports<'a, I>(import_iter: I, global_index_tree: Arc<GlobalIndexTree>) -> Self
     where
         I: IntoIterator<Item = &'a str>,
     {
@@ -442,15 +442,15 @@ impl ImportedIndexTree {
 
 #[derive(Debug, Clone)]
 pub struct LocalIndexTree {
-    global: Rc<GlobalIndexTree>,
+    global: Arc<GlobalIndexTree>,
     imported: ImportedIndexTree,
-    local: Rc<IndexTree>,
-    reverse_local: Rc<HashMap<ClassCell, NodeIdx<Dyn<TreeNode>>>>,
+    local: Arc<IndexTree>,
+    reverse_local: Arc<HashMap<ClassCell, NodeIdx<Dyn<TreeNode>>>>,
 }
 
 impl LocalIndexTree {
     pub fn new(
-        global: Rc<GlobalIndexTree>,
+        global: Arc<GlobalIndexTree>,
         imported: ImportedIndexTree,
         shared_local: SharedLocalIndex,
     ) -> Self {

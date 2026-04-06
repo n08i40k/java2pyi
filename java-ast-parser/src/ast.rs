@@ -1,9 +1,8 @@
 use bitflags::bitflags;
 use ownable::traits::IntoOwned;
 use std::borrow::Cow;
-use std::cell::RefCell;
 use std::ops::Deref;
-use std::rc::Rc;
+use std::sync::{Arc, Mutex, MutexGuard};
 
 pub trait GetIdent {
     fn ident(&self) -> &str;
@@ -11,7 +10,17 @@ pub trait GetIdent {
 
 #[allow(clippy::mutable_key_type)]
 #[derive(Debug, Clone)]
-pub struct ObjectCell<T: GetIdent>(Rc<String>, Rc<RefCell<T>>);
+pub struct ObjectCell<T: GetIdent>(Arc<String>, Arc<Mutex<T>>);
+
+impl<T: GetIdent> ObjectCell<T> {
+    pub fn borrow(&self) -> MutexGuard<'_, T> {
+        self.1.lock().unwrap()
+    }
+
+    pub fn borrow_mut(&self) -> MutexGuard<'_, T> {
+        self.1.lock().unwrap()
+    }
+}
 
 impl<T: GetIdent> GetIdent for ObjectCell<T> {
     fn ident(&self) -> &str {
@@ -22,21 +31,21 @@ impl<T: GetIdent> GetIdent for ObjectCell<T> {
 impl<T: GetIdent> From<T> for ObjectCell<T> {
     fn from(value: T) -> Self {
         Self(
-            Rc::new(value.ident().to_string()),
-            Rc::new(RefCell::new(value)),
+            Arc::new(value.ident().to_string()),
+            Arc::new(Mutex::new(value)),
         )
     }
 }
 
-impl<T: GetIdent> From<Rc<RefCell<T>>> for ObjectCell<T> {
-    fn from(value: Rc<RefCell<T>>) -> Self {
-        let ident = Rc::new(value.borrow().ident().to_string());
+impl<T: GetIdent> From<Arc<Mutex<T>>> for ObjectCell<T> {
+    fn from(value: Arc<Mutex<T>>) -> Self {
+        let ident = Arc::new(value.lock().unwrap().ident().to_string());
         Self(ident, value)
     }
 }
 
 impl<T: GetIdent> Deref for ObjectCell<T> {
-    type Target = RefCell<T>;
+    type Target = Mutex<T>;
 
     fn deref(&self) -> &Self::Target {
         self.1.deref()
@@ -45,13 +54,13 @@ impl<T: GetIdent> Deref for ObjectCell<T> {
 
 impl<T: GetIdent> std::hash::Hash for ObjectCell<T> {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        std::ptr::hash(self.1.deref().as_ptr(), state);
+        std::ptr::hash(Arc::as_ptr(&self.1), state);
     }
 }
 
 impl<T: GetIdent> std::cmp::PartialEq for ObjectCell<T> {
     fn eq(&self, other: &Self) -> bool {
-        self.1.as_ptr() == other.1.as_ptr()
+        Arc::as_ptr(&self.1) == Arc::as_ptr(&other.1)
     }
 }
 
@@ -121,11 +130,11 @@ impl std::fmt::Debug for TypeName {
             Self::ResolvedGeneric(arg0) => f.debug_tuple("ResolvedGeneric").field(arg0).finish(),
             Self::ResolvedClass(arg0) => f
                 .debug_tuple("ResolvedIdent")
-                .field(&arg0.borrow().ident)
+                .field(&arg0.lock().unwrap().ident)
                 .finish(),
             Self::ResolvedInterface(arg0) => f
                 .debug_tuple("ResolvedInterface")
-                .field(&arg0.borrow().ident)
+                .field(&arg0.lock().unwrap().ident)
                 .finish(),
         }
     }

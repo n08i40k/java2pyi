@@ -1,11 +1,15 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
-use std::rc::Rc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
+};
 
 use crate::status;
 use java_ast_parser::ast::{
     self, ClassCell, EnumCell, Function, InterfaceCell, Modifiers, QualifiedType, Root,
     TypeGeneric, TypeName, WildcardBoundary,
 };
+use rayon::prelude::{IntoParallelIterator, ParallelIterator};
 
 trait QualifiedTypeFormat {
     fn fmt(&self) -> String;
@@ -20,11 +24,11 @@ impl QualifiedTypeFormat for QualifiedType {
     }
 }
 
-pub fn generate_pyi_by_package(roots: &[Rc<Root>]) -> HashMap<String, String> {
-    let definition_paths = Rc::new(collect_definition_paths(roots));
-    let class_paths = Rc::new(definition_paths.class_paths.clone());
+pub fn generate_pyi_by_package(roots: &[Arc<Root>]) -> HashMap<String, String> {
+    let definition_paths = Arc::new(collect_definition_paths(roots));
+    let class_paths = Arc::new(definition_paths.class_paths.clone());
 
-    let mut roots_by_package: HashMap<String, Vec<Rc<Root>>> = HashMap::new();
+    let mut roots_by_package: HashMap<String, Vec<Arc<Root>>> = HashMap::new();
     for root in roots {
         roots_by_package
             .entry(root.package.clone())
@@ -32,61 +36,62 @@ pub fn generate_pyi_by_package(roots: &[Rc<Root>]) -> HashMap<String, String> {
             .push(root.clone());
     }
 
-    let mut outputs = HashMap::new();
     let total_packages = roots_by_package.len();
     status::update(&format!("Serializing 0/{}", total_packages));
-    for (index, (package, package_roots)) in roots_by_package.into_iter().enumerate() {
-        let label = if package.is_empty() {
-            "<root>".to_string()
-        } else {
-            package.clone()
-        };
-        status::update(&format!(
-            "Serializing {}/{}: {}",
-            index + 1,
-            total_packages,
-            label
-        ));
-        let module_imports = collect_module_imports(&package_roots, &definition_paths);
-        let mut emitter = PyiEmitter::new(
-            class_paths.clone(),
-            definition_paths.clone(),
-            module_imports,
-        );
+    let progress = AtomicUsize::new(0);
+    roots_by_package
+        .into_par_iter()
+        .map(|(package, package_roots)| {
+            let module_imports = collect_module_imports(&package_roots, &definition_paths);
+            let mut emitter = PyiEmitter::new(
+                class_paths.clone(),
+                definition_paths.clone(),
+                module_imports,
+            );
 
-        emitter.emit_header();
+            emitter.emit_header();
 
-        let empty_type_params = BTreeSet::new();
-        for root in &package_roots {
-            for class_cell in &root.classes {
-                emitter.emit_class(class_cell, &empty_type_params);
+            let empty_type_params = BTreeSet::new();
+            for root in &package_roots {
+                for class_cell in &root.classes {
+                    emitter.emit_class(class_cell, &empty_type_params);
+                }
+                for interface_cell in &root.interfaces {
+                    emitter.emit_interface(interface_cell, &empty_type_params);
+                }
+                for enum_cell in &root.enums {
+                    emitter.emit_enum(enum_cell, &empty_type_params);
+                }
             }
-            for interface_cell in &root.interfaces {
-                emitter.emit_interface(interface_cell, &empty_type_params);
-            }
-            for enum_cell in &root.enums {
-                emitter.emit_enum(enum_cell, &empty_type_params);
-            }
-        }
 
-        outputs.insert(package, emitter.finish());
-    }
+            let completed = progress.fetch_add(1, Ordering::Relaxed) + 1;
+            let label = if package.is_empty() {
+                "<root>"
+            } else {
+                package.as_str()
+            };
+            status::update(&format!(
+                "Serializing {}/{}: {}",
+                completed, total_packages, label
+            ));
 
-    outputs
+            (package, emitter.finish())
+        })
+        .collect()
 }
 
 struct PyiEmitter {
     output: String,
     indent: usize,
     type_renderer: TypeRenderer,
-    definition_paths: Rc<DefinitionPaths>,
+    definition_paths: Arc<DefinitionPaths>,
     module_imports: BTreeSet<String>,
 }
 
 impl PyiEmitter {
     fn new(
-        class_paths: Rc<HashMap<ClassCell, String>>,
-        definition_paths: Rc<DefinitionPaths>,
+        class_paths: Arc<HashMap<ClassCell, String>>,
+        definition_paths: Arc<DefinitionPaths>,
         module_imports: BTreeSet<String>,
     ) -> Self {
         Self {
@@ -94,8 +99,8 @@ impl PyiEmitter {
             indent: 0,
             type_renderer: TypeRenderer::new(
                 class_paths,
-                Rc::new(definition_paths.interface_paths.clone()),
-                Rc::new(
+                Arc::new(definition_paths.interface_paths.clone()),
+                Arc::new(
                     definition_paths
                         .class_paths
                         .values()
@@ -128,15 +133,14 @@ impl PyiEmitter {
         let mut rendered_bases =
             collect_class_base_types(&class, &self.type_renderer, &class_type_params);
         let mut inserted_special_base = false;
-        if let Some(special_base) = java_stdlib_python_base(&class_path, &class.generics) {
-            if !rendered_bases
+        if let Some(special_base) = java_stdlib_python_base(&class_path, &class.generics)
+            && !rendered_bases
                 .bases
                 .iter()
                 .any(|base| base == &special_base)
-            {
-                rendered_bases.bases.insert(0, special_base);
-                inserted_special_base = true;
-            }
+        {
+            rendered_bases.bases.insert(0, special_base);
+            inserted_special_base = true;
         }
         if class_path != "java.lang.Object" && class.extends.is_none() {
             let object_base = "java.lang.Object".to_string();
@@ -178,9 +182,11 @@ impl PyiEmitter {
 
         for variable in &class.variables {
             has_members = true;
-            let rendered = self
-                .type_renderer
-                .render_in_scope(&class_path, &variable.r#type, &class_type_params);
+            let rendered = self.type_renderer.render_in_scope(
+                &class_path,
+                &variable.r#type,
+                &class_type_params,
+            );
             let ident = sanitize_ident(&variable.ident);
             let mut line = format!("{}: {}", ident, rendered.text);
             if rendered.has_unknown() {
@@ -237,14 +243,13 @@ impl PyiEmitter {
         let interface_path = self.definition_paths.interface_path(interface_cell);
         let mut rendered_bases =
             collect_interface_base_types(&interface, &self.type_renderer, &interface_type_params);
-        if let Some(special_base) = java_stdlib_python_base(&interface_path, &interface.generics) {
-            if !rendered_bases
+        if let Some(special_base) = java_stdlib_python_base(&interface_path, &interface.generics)
+            && !rendered_bases
                 .bases
                 .iter()
                 .any(|base| base == &special_base)
-            {
-                rendered_bases.bases.insert(0, special_base);
-            }
+        {
+            rendered_bases.bases.insert(0, special_base);
         }
         let bases_suffix = if rendered_bases.bases.is_empty() {
             String::new()
@@ -270,9 +275,11 @@ impl PyiEmitter {
 
         for variable in &interface.variables {
             has_members = true;
-            let rendered = self
-                .type_renderer
-                .render_in_scope(&interface_path, &variable.r#type, &interface_type_params);
+            let rendered = self.type_renderer.render_in_scope(
+                &interface_path,
+                &variable.r#type,
+                &interface_type_params,
+            );
             let ident = sanitize_ident(&variable.ident);
             let mut line = format!("{}: {}", ident, rendered.text);
             if rendered.has_unknown() {
@@ -355,9 +362,9 @@ impl PyiEmitter {
 
         for variable in &r#enum.variables {
             has_members = true;
-            let rendered = self
-                .type_renderer
-                .render_in_scope(&enum_path, &variable.r#type, &enum_type_params);
+            let rendered =
+                self.type_renderer
+                    .render_in_scope(&enum_path, &variable.r#type, &enum_type_params);
             let ident = sanitize_ident(&variable.ident);
             let mut line = format!("{}: {}", ident, rendered.text);
             if rendered.has_unknown() {
@@ -433,9 +440,9 @@ impl PyiEmitter {
 
         let mut unknown_paths = HashMap::new();
         for argument in &function.arguments {
-            let rendered = self
-                .type_renderer
-                .render_in_scope(class_path, &argument.r#type, type_params);
+            let rendered =
+                self.type_renderer
+                    .render_in_scope(class_path, &argument.r#type, type_params);
             let arg_prefix = if argument.vararg { "*" } else { "" };
             let ident = sanitize_ident(&argument.ident);
             args.push(format!("{}{}: {}", arg_prefix, ident, rendered.text));
@@ -448,8 +455,11 @@ impl PyiEmitter {
         }
 
         let rendered_return = if function.ident == "__ctor" {
-            self.type_renderer
-                .render_constructor_return(class_path, &function.return_type, type_params)
+            self.type_renderer.render_constructor_return(
+                class_path,
+                &function.return_type,
+                type_params,
+            )
         } else {
             self.type_renderer
                 .render_in_scope(class_path, &function.return_type, type_params)
@@ -571,7 +581,7 @@ fn is_python_keyword(ident: &str) -> bool {
 }
 
 fn collect_module_imports(
-    roots: &[Rc<Root>],
+    roots: &[Arc<Root>],
     definition_paths: &DefinitionPaths,
 ) -> BTreeSet<String> {
     let mut modules = BTreeSet::new();
@@ -886,9 +896,9 @@ fn format_type_params(generics: &[ast::GenericDefinition]) -> String {
 }
 
 struct TypeRenderer {
-    class_paths: Rc<HashMap<ClassCell, String>>,
-    interface_paths: Rc<HashMap<InterfaceCell, String>>,
-    known_paths: Rc<HashSet<String>>,
+    class_paths: Arc<HashMap<ClassCell, String>>,
+    interface_paths: Arc<HashMap<InterfaceCell, String>>,
+    known_paths: Arc<HashSet<String>>,
 }
 
 struct RenderedType {
@@ -918,9 +928,9 @@ impl RenderedType {
 
 impl TypeRenderer {
     fn new(
-        class_paths: Rc<HashMap<ClassCell, String>>,
-        interface_paths: Rc<HashMap<InterfaceCell, String>>,
-        known_paths: Rc<HashSet<String>>,
+        class_paths: Arc<HashMap<ClassCell, String>>,
+        interface_paths: Arc<HashMap<InterfaceCell, String>>,
+        known_paths: Arc<HashSet<String>>,
     ) -> Self {
         Self {
             class_paths,
@@ -1008,7 +1018,8 @@ impl TypeRenderer {
             return RenderedType::known(class_path.to_string());
         };
 
-        let mut rendered = self.render_named_type(class_path.to_string(), &last.generics, type_params);
+        let mut rendered =
+            self.render_named_type(class_path.to_string(), &last.generics, type_params);
         if last.array_depth > 0 {
             for _ in 0..last.array_depth {
                 rendered.text = format!("list[{}]", rendered.text);
@@ -1090,7 +1101,7 @@ impl TypeRenderer {
     }
 }
 
-fn collect_definition_paths(roots: &[Rc<Root>]) -> DefinitionPaths {
+fn collect_definition_paths(roots: &[Arc<Root>]) -> DefinitionPaths {
     let mut paths = DefinitionPaths {
         class_paths: HashMap::new(),
         class_modules: HashMap::new(),
