@@ -321,7 +321,7 @@ dependencies = [
 
 [[package]]
 name = "java-ast-parser"
-version = "0.1.2"
+version = "1.0.0"
 dependencies = [
  "bitflags",
  "itertools",
@@ -333,7 +333,7 @@ dependencies = [
 
 [[package]]
 name = "java2pyi"
-version = "0.1.5"
+version = "1.0.0"
 dependencies = [
  "env_logger",
  "java-ast-parser",
