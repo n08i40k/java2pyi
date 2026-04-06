@@ -1,6 +1,7 @@
 #![allow(clippy::mutable_key_type)]
 
 use std::{
+    collections::HashSet,
     env, fs,
     path::{Path, PathBuf},
     sync::{
@@ -13,6 +14,8 @@ use rayon::{
     ThreadPoolBuilder,
     iter::{IndexedParallelIterator, IntoParallelRefIterator, ParallelIterator},
 };
+
+use java_ast_parser::ast::{ClassCell, EnumCell, GetIdent, InterfaceCell, Root};
 
 use crate::preprocess::{parse_java_ast, preprocess_asts};
 use crate::pyi::generate_pyi_by_package;
@@ -112,10 +115,12 @@ fn main() {
 
         result
     };
+    let mut asts = asts;
+    apply_type_exclusions(&mut asts, &options);
 
     if asts.is_empty() {
         status::clear();
-        eprintln!("no parsable .java files found");
+        eprintln!("no parsable .java files found after applying exclusions");
         return;
     }
 
@@ -215,12 +220,16 @@ struct CliOptions {
     inputs: Vec<PathBuf>,
     out_dir: PathBuf,
     excludes: Vec<PathBuf>,
+    exclude_packages: Vec<String>,
+    exclude_identifiers: HashSet<String>,
 }
 
 fn parse_args(args: Vec<String>) -> Result<CliOptions, String> {
     let mut inputs = Vec::new();
     let mut out_dir = PathBuf::from("out");
     let mut excludes = Vec::new();
+    let mut exclude_packages = Vec::new();
+    let mut exclude_identifiers = HashSet::new();
     let mut iter = args.into_iter();
     let _program = iter.next();
 
@@ -244,6 +253,24 @@ fn parse_args(args: Vec<String>) -> Result<CliOptions, String> {
                     .ok_or_else(|| "missing value for --exclude".to_string())?;
                 excludes.push(PathBuf::from(value));
             }
+            "-xp" | "--exclude-packages" => {
+                let value = iter
+                    .next()
+                    .ok_or_else(|| "missing value for --exclude-packages".to_string())?;
+                let value = normalize_qualified_name(&value);
+                if !value.is_empty() {
+                    exclude_packages.push(value);
+                }
+            }
+            "-xi" | "--exclude-identifiers" => {
+                let value = iter
+                    .next()
+                    .ok_or_else(|| "missing value for --exclude-identifiers".to_string())?;
+                let value = normalize_qualified_name(&value);
+                if !value.is_empty() {
+                    exclude_identifiers.insert(value);
+                }
+            }
             "-h" | "--help" => {
                 return Err(String::from("help requested"));
             }
@@ -264,17 +291,23 @@ fn parse_args(args: Vec<String>) -> Result<CliOptions, String> {
         inputs,
         out_dir,
         excludes,
+        exclude_packages,
+        exclude_identifiers,
     })
 }
 
 fn usage() -> String {
     [
         "Usage:",
-        "  java2pyi -i <path> [-i <path> ...] [-x <path> ...] [--out <dir>]",
+        "  java2pyi -i <path> [-i <path> ...] [-x <path> ...] [-xp <package> ...] [-xi <identifier> ...] [--out <dir>]",
         "",
         "Options:",
         "  -i, --input <path>      Input file or directory (recurses for .java)",
         "  -x, --exclude <path>    Exclude file or directory (repeatable)",
+        "  -xp, --exclude-packages <package>",
+        "                         Exclude package and subpackages from indexing/serialization",
+        "  -xi, --exclude-identifiers <identifier>",
+        "                         Exclude class/interface/enum and nested types from indexing/serialization",
         "  -o, --out <dir>         Output directory (default: out)",
         "  -h, --help              Show this help",
     ]
@@ -336,4 +369,128 @@ fn is_java_file(path: &Path) -> bool {
 
 fn is_excluded(path: &Path, excludes: &[PathBuf]) -> bool {
     excludes.iter().any(|exclude| path.starts_with(exclude))
+}
+
+fn normalize_qualified_name(value: &str) -> String {
+    value.trim().trim_matches('.').to_string()
+}
+
+fn is_excluded_package(package: &str, exclude_packages: &[String]) -> bool {
+    exclude_packages.iter().any(|prefix| {
+        package == prefix
+            || package
+                .strip_prefix(prefix)
+                .is_some_and(|suffix| suffix.starts_with('.'))
+    })
+}
+
+fn qualified_type_path(prefix: &str, ident: &str) -> String {
+    if prefix.is_empty() {
+        ident.to_string()
+    } else {
+        format!("{}.{}", prefix, ident)
+    }
+}
+
+fn filter_class_cells(
+    cells: &[ClassCell],
+    prefix: &str,
+    exclude_identifiers: &HashSet<String>,
+) -> Box<[ClassCell]> {
+    cells
+        .iter()
+        .filter_map(|cell| {
+            let path = qualified_type_path(prefix, cell.ident());
+            if exclude_identifiers.contains(&path) {
+                return None;
+            }
+
+            {
+                let mut class = cell.borrow_mut();
+                class.classes = filter_class_cells(&class.classes, &path, exclude_identifiers);
+                class.interfaces =
+                    filter_interface_cells(&class.interfaces, &path, exclude_identifiers);
+                class.enums = filter_enum_cells(&class.enums, &path, exclude_identifiers);
+            }
+
+            Some(cell.clone())
+        })
+        .collect()
+}
+
+fn filter_interface_cells(
+    cells: &[InterfaceCell],
+    prefix: &str,
+    exclude_identifiers: &HashSet<String>,
+) -> Box<[InterfaceCell]> {
+    cells
+        .iter()
+        .filter_map(|cell| {
+            let path = qualified_type_path(prefix, cell.ident());
+            if exclude_identifiers.contains(&path) {
+                return None;
+            }
+
+            {
+                let mut interface = cell.borrow_mut();
+                interface.classes =
+                    filter_class_cells(&interface.classes, &path, exclude_identifiers);
+                interface.interfaces =
+                    filter_interface_cells(&interface.interfaces, &path, exclude_identifiers);
+                interface.enums = filter_enum_cells(&interface.enums, &path, exclude_identifiers);
+            }
+
+            Some(cell.clone())
+        })
+        .collect()
+}
+
+fn filter_enum_cells(
+    cells: &[EnumCell],
+    prefix: &str,
+    exclude_identifiers: &HashSet<String>,
+) -> Box<[EnumCell]> {
+    cells
+        .iter()
+        .filter_map(|cell| {
+            let path = qualified_type_path(prefix, cell.ident());
+            if exclude_identifiers.contains(&path) {
+                return None;
+            }
+
+            {
+                let mut r#enum = cell.borrow_mut();
+                r#enum.classes = filter_class_cells(&r#enum.classes, &path, exclude_identifiers);
+                r#enum.interfaces =
+                    filter_interface_cells(&r#enum.interfaces, &path, exclude_identifiers);
+                r#enum.enums = filter_enum_cells(&r#enum.enums, &path, exclude_identifiers);
+            }
+
+            Some(cell.clone())
+        })
+        .collect()
+}
+
+fn apply_type_exclusions(asts: &mut Vec<Arc<Root>>, options: &CliOptions) {
+    if options.exclude_packages.is_empty() && options.exclude_identifiers.is_empty() {
+        return;
+    }
+
+    asts.retain_mut(|ast| {
+        let root = Arc::get_mut(ast).expect("AST root must be uniquely owned before preprocessing");
+        if is_excluded_package(&root.package, &options.exclude_packages) {
+            return false;
+        }
+
+        root.classes =
+            filter_class_cells(&root.classes, &root.package, &options.exclude_identifiers);
+        root.interfaces = filter_interface_cells(
+            &root.interfaces,
+            &root.package,
+            &options.exclude_identifiers,
+        );
+        root.enums = filter_enum_cells(&root.enums, &root.package, &options.exclude_identifiers);
+
+        !(root.classes.is_empty() && root.interfaces.is_empty() && root.enums.is_empty())
+    });
 }
