@@ -23,6 +23,7 @@ use std::{
 use crate::java;
 
 /// Categories of lexical errors produced by [`Lexer`].
+#[allow(clippy::enum_variant_names)]
 #[derive(Default, Debug, Clone, PartialEq)]
 pub enum LexicalErrorKind {
     #[default]
