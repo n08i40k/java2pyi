@@ -252,9 +252,9 @@ impl PyiEmitter {
             rendered_bases.bases.insert(0, special_base);
         }
         let bases_suffix = if rendered_bases.bases.is_empty() {
-            String::new()
+            "(java.lang.Object)".to_string()
         } else {
-            format!("({})", rendered_bases.bases.join(", "))
+            format!("(java.lang.Object, {})", rendered_bases.bases.join(", "))
         };
 
         let mut line = format!(
@@ -339,7 +339,7 @@ impl PyiEmitter {
             collect_enum_base_types(&r#enum, &self.type_renderer, &enum_type_params);
         let bases = rendered_bases.bases;
         let bases_suffix = if bases.is_empty() {
-            String::new()
+            "(java.lang.Object)".to_string()
         } else {
             format!("({})", bases.join(", "))
         };
