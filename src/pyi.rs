@@ -430,7 +430,7 @@ impl<'a> PyiEmitter<'a> {
         let bases_suffix = if bases.is_empty() {
             "(java.lang.Object)".to_string()
         } else {
-            format!("({})", bases.join(", "))
+            format!("(java.lang.Object, {})", bases.join(", "))
         };
 
         let mut line = format!(
