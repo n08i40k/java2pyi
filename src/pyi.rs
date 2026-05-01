@@ -269,14 +269,6 @@ impl<'a> PyiEmitter<'a> {
         self.indent += 1;
 
         let mut has_members = false;
-        let has_explicit_init = class
-            .functions
-            .iter()
-            .any(|function| function.ident == "__init__");
-        if !has_explicit_init {
-            has_members = true;
-            self.line("def __init__(self, *args: Any, **kwargs: Any) -> None: ...".to_string());
-        }
 
         for variable in &class.variables {
             has_members = true;
@@ -519,17 +511,16 @@ impl<'a> PyiEmitter<'a> {
             self.line("@overload".to_string());
         }
 
-        let is_object_get_class = class_path == "java.lang.Object" && function.ident == "getClass";
+        let is_static = function.modifiers.intersects(Modifiers::STATIC);
+        let is_ctor = function.ident == "__ctor";
 
-        let is_static =
-            function.ident == "__ctor" || function.modifiers.intersects(Modifiers::STATIC);
         if is_static {
             self.line("@staticmethod".to_string());
         }
 
         let mut args = Vec::new();
         if !is_static {
-            if is_object_get_class {
+            if class_path == "java.lang.Object" && function.ident == "getClass" {
                 args.push("self = None".to_string());
             } else {
                 args.push("self".to_string());
@@ -555,7 +546,7 @@ impl<'a> PyiEmitter<'a> {
             }
         }
 
-        let rendered_return = if function.ident == "__ctor" {
+        let rendered_return = if is_ctor {
             self.type_renderer.render_constructor_return(
                 class_path,
                 &function.return_type,
@@ -565,6 +556,7 @@ impl<'a> PyiEmitter<'a> {
             self.type_renderer
                 .render_in_scope(class_path, &function.return_type, type_params)
         };
+
         if rendered_return.has_unknown() {
             unknown_paths.insert(
                 format!("{}.{}", class_path, function.ident),
@@ -573,9 +565,14 @@ impl<'a> PyiEmitter<'a> {
         }
 
         let type_params_suffix = format_type_params(&function.generics);
+
         let mut line = format!(
             "def {}{}({}) -> {}: ...",
-            function.ident,
+            if is_ctor {
+                "__init__"
+            } else {
+                function.ident.as_str()
+            },
             type_params_suffix,
             args.join(", "),
             rendered_return.text
