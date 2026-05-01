@@ -1,4 +1,5 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
+use std::fmt::format;
 use std::sync::{
     Arc,
     atomic::{AtomicUsize, Ordering},
@@ -10,6 +11,9 @@ use java_ast_parser::ast::{
     TypeGeneric, TypeName, WildcardBoundary,
 };
 use rayon::prelude::{IntoParallelIterator, ParallelIterator};
+
+const PYI_PACKAGE: &str = "java2pyi";
+const PYI_TYPES_SUBPACKAGE: &str = "types";
 
 trait QualifiedTypeFormat {
     fn fmt(&self) -> String;
@@ -24,7 +28,10 @@ impl QualifiedTypeFormat for QualifiedType {
     }
 }
 
-pub fn generate_pyi_by_package(roots: &[Arc<Root>]) -> HashMap<String, String> {
+pub fn generate_pyi_by_package(
+    roots: &[Arc<Root>],
+    mixer_records: HashMap<String, String>,
+) -> HashMap<String, String> {
     let definition_paths = Arc::new(collect_definition_paths(roots));
     let class_paths = Arc::new(definition_paths.class_paths.clone());
 
@@ -39,14 +46,18 @@ pub fn generate_pyi_by_package(roots: &[Arc<Root>]) -> HashMap<String, String> {
     let total_packages = roots_by_package.len();
     status::update(&format!("Serializing 0/{}", total_packages));
     let progress = AtomicUsize::new(0);
-    roots_by_package
+    let mixer = Mixer::new(mixer_records);
+
+    let mut files: HashMap<String, String> = roots_by_package
         .into_par_iter()
         .map(|(package, package_roots)| {
             let module_imports = collect_module_imports(&package_roots, &definition_paths);
+
             let mut emitter = PyiEmitter::new(
                 class_paths.clone(),
                 definition_paths.clone(),
                 module_imports,
+                &mixer,
             );
 
             emitter.emit_header();
@@ -77,22 +88,107 @@ pub fn generate_pyi_by_package(roots: &[Arc<Root>]) -> HashMap<String, String> {
 
             (package, emitter.finish())
         })
-        .collect()
+        .collect();
+
+    files.insert(
+        format!("{PYI_PACKAGE}.{PYI_TYPES_SUBPACKAGE}"),
+        mixer.gen_stub(),
+    );
+
+    files
 }
 
-struct PyiEmitter {
+struct MixerEntry {
+    from_java_ty: String,
+    to_python_ty: String,
+    fq_union_name: String,
+    union_name: String,
+}
+
+impl MixerEntry {
+    pub fn new(from_java_ty: String, to_python_ty: String) -> Self {
+        let name = format!("{}Like", from_java_ty.rsplit(".").next().unwrap());
+        Self {
+            from_java_ty,
+            to_python_ty,
+            fq_union_name: format!("{PYI_PACKAGE}.{PYI_TYPES_SUBPACKAGE}.{name}"),
+            union_name: name,
+        }
+    }
+
+    pub fn gen_union(&self) -> String {
+        format!(
+            "{} = Union[{}, {}]",
+            self.union_name, self.from_java_ty, self.to_python_ty
+        )
+    }
+}
+
+struct Mixer {
+    records: HashMap<String, MixerEntry>,
+}
+
+impl Mixer {
+    pub fn new(mut records: HashMap<String, String>) -> Self {
+        records.insert(String::from("java.lang.Object"), String::from("Any"));
+        records.insert(String::from("java.lang.Boolean"), String::from("bool"));
+        records.insert(String::from("java.lang.Integer"), String::from("int"));
+        records.insert(String::from("java.lang.Long"), String::from("int"));
+        records.insert(String::from("java.lang.Float"), String::from("float"));
+        records.insert(String::from("java.lang.Double"), String::from("float"));
+        records.insert(String::from("java.lang.String"), String::from("str"));
+
+        Self {
+            records: records
+                .into_iter()
+                .map(|(k, v)| (k.clone(), MixerEntry::new(k, v)))
+                .collect(),
+        }
+    }
+
+    pub fn try_mix(&self, java_ty: &str) -> String {
+        self.records
+            .get(java_ty)
+            .map(|entry| entry.fq_union_name.clone())
+            .unwrap_or_else(|| java_ty.to_string())
+    }
+
+    pub fn gen_stub(&self) -> String {
+        let imports = self
+            .records
+            .values()
+            .map(|entry| entry.from_java_ty.rsplit_once(".").unwrap().0.to_string())
+            .collect::<HashSet<String>>()
+            .into_iter()
+            .map(|ns| format!("import {ns}"))
+            .collect::<Box<[_]>>()
+            .join("\n");
+
+        let body = self
+            .records
+            .values()
+            .map(MixerEntry::gen_union)
+            .collect::<Box<[_]>>()
+            .join("\n");
+
+        format!("from typing import Any, Union\n{imports}\n\n{body}")
+    }
+}
+
+struct PyiEmitter<'a> {
     output: String,
     indent: usize,
-    type_renderer: TypeRenderer,
+    type_renderer: TypeRenderer<'a>,
     definition_paths: Arc<DefinitionPaths>,
     module_imports: BTreeSet<String>,
 }
 
-impl PyiEmitter {
+impl<'a> PyiEmitter<'a> {
     fn new(
         class_paths: Arc<HashMap<ClassCell, String>>,
         definition_paths: Arc<DefinitionPaths>,
         module_imports: BTreeSet<String>,
+        mixer: &'a Mixer,
     ) -> Self {
         Self {
             output: String::new(),
@@ -109,6 +205,7 @@ impl PyiEmitter {
                         .cloned()
                         .collect(),
                 ),
+                mixer,
             ),
             definition_paths,
             module_imports,
@@ -117,6 +214,7 @@ impl PyiEmitter {
 
     fn emit_header(&mut self) {
         self.line("from __future__ import annotations".to_string());
+        self.line(format!("import {}.{}", PYI_PACKAGE, PYI_TYPES_SUBPACKAGE));
         let module_imports = self.module_imports.iter().cloned().collect::<Vec<_>>();
         for module_import in module_imports {
             self.line(format!("import {}", module_import));
@@ -443,9 +541,12 @@ impl PyiEmitter {
             let rendered =
                 self.type_renderer
                     .render_in_scope(class_path, &argument.r#type, type_params);
+
             let arg_prefix = if argument.vararg { "*" } else { "" };
             let ident = sanitize_ident(&argument.ident);
+
             args.push(format!("{}{}: {}", arg_prefix, ident, rendered.text));
+
             if rendered.has_unknown() {
                 unknown_paths.insert(
                     format!("{}.{}.{}", class_path, function.ident, argument.ident),
@@ -895,10 +996,11 @@ fn format_type_params(generics: &[ast::GenericDefinition]) -> String {
     format!("[{}]", params)
 }
 
-struct TypeRenderer {
+struct TypeRenderer<'a> {
     class_paths: Arc<HashMap<ClassCell, String>>,
     interface_paths: Arc<HashMap<InterfaceCell, String>>,
     known_paths: Arc<HashSet<String>>,
+    mixer: &'a Mixer,
 }
 
 struct RenderedType {
@@ -926,16 +1028,18 @@ impl RenderedType {
     }
 }
 
-impl TypeRenderer {
+impl<'a> TypeRenderer<'a> {
     fn new(
         class_paths: Arc<HashMap<ClassCell, String>>,
         interface_paths: Arc<HashMap<InterfaceCell, String>>,
         known_paths: Arc<HashSet<String>>,
+        mixer: &'a Mixer,
     ) -> Self {
         Self {
             class_paths,
             interface_paths,
             known_paths,
+            mixer,
         }
     }
 
@@ -1057,7 +1161,7 @@ impl TypeRenderer {
         type_params: &BTreeSet<String>,
     ) -> RenderedType {
         if generics.is_empty() {
-            return RenderedType::known(base);
+            return RenderedType::known(self.mixer.try_mix(&base));
         }
 
         let mut unknown = Vec::new();

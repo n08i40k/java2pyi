@@ -1,7 +1,7 @@
 #![allow(clippy::mutable_key_type)]
 
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     env, fs,
     path::{Path, PathBuf},
     sync::{
@@ -126,7 +126,7 @@ fn main() {
 
     worker_pool.install(|| preprocess_asts(&asts));
 
-    let outputs = worker_pool.install(|| generate_pyi_by_package(&asts));
+    let outputs = worker_pool.install(|| generate_pyi_by_package(&asts, options.mixer_records));
     let output_items = outputs.into_iter().collect::<Vec<_>>();
 
     let total_outputs = output_items.len();
@@ -222,6 +222,7 @@ struct CliOptions {
     excludes: Vec<PathBuf>,
     exclude_packages: Vec<String>,
     exclude_identifiers: HashSet<String>,
+    mixer_records: HashMap<String, String>,
 }
 
 fn parse_args(args: Vec<String>) -> Result<CliOptions, String> {
@@ -230,6 +231,7 @@ fn parse_args(args: Vec<String>) -> Result<CliOptions, String> {
     let mut excludes = Vec::new();
     let mut exclude_packages = Vec::new();
     let mut exclude_identifiers = HashSet::new();
+    let mut mixer_records = HashMap::new();
     let mut iter = args.into_iter();
     let _program = iter.next();
 
@@ -271,6 +273,20 @@ fn parse_args(args: Vec<String>) -> Result<CliOptions, String> {
                     exclude_identifiers.insert(value);
                 }
             }
+            "-m" | "--mix" => {
+                let value = iter
+                    .next()
+                    .ok_or_else(|| "missing value for --mix".to_string())?
+                    .split(",")
+                    .map(|kv| {
+                        kv.split_once(":")
+                            .map(|(l, r)| (l.to_string(), r.to_string()))
+                            .ok_or_else(|| "invalid value passed in --mix".to_string())
+                    })
+                    .collect::<Result<HashMap<String, String>, _>>()?;
+
+                mixer_records.extend(value);
+            }
             "-h" | "--help" => {
                 return Err(String::from("help requested"));
             }
@@ -293,6 +309,7 @@ fn parse_args(args: Vec<String>) -> Result<CliOptions, String> {
         excludes,
         exclude_packages,
         exclude_identifiers,
+        mixer_records,
     })
 }
 
@@ -308,6 +325,8 @@ fn usage() -> String {
         "                         Exclude package and subpackages from indexing/serialization",
         "  -xi, --exclude-identifiers <identifier>",
         "                         Exclude class/interface/enum and nested types from indexing/serialization",
+        "  -m, --mix [<Java FQTN>:<Python built-in type name>,]",
+        "                         Allow to use Python built-in type as Java type in variables, function args and return types",
         "  -o, --out <dir>         Output directory (default: out)",
         "  -h, --help              Show this help",
     ]
