@@ -8,472 +8,45 @@ use std::{
     },
 };
 
-use java_ast_parser::ast::{
-    self, ClassCell, EnumCell, GetIdent, InterfaceCell, TypeGeneric, TypeName,
-};
-use log::debug;
 use rayon::prelude::{IntoParallelRefIterator, ParallelIterator};
 
-use crate::index_tree::{
-    GlobalIndexTree, ImportedIndexTree, LocalIndexTree, PackageIndexTree, ResolvedType,
+use crate::{
+    index_tree::{GlobalIndexTree, ImportedIndexTree, LocalIndexTree, PackageIndexTree},
+    model::{Exclusions, Root},
+    status,
 };
-use crate::status;
 
-/// Parse ast and convert it to owned ("disconnect" from string).
+/// Parse AST and keep parser-owned source storage alive through RootCell.
 pub fn parse_java_ast<P: AsRef<Path>>(
     path: P,
-) -> std::result::Result<java_ast_parser::ast::Root, Box<java_ast_parser::ErrorCell<'static>>> {
+) -> std::result::Result<Root, Box<java_ast_parser::ErrorCell<'static>>> {
     let data = fs::read_to_string(path).unwrap();
-
-    java_ast_parser::parse(&data).map_err(|x| Box::new(x.into_owned()))
-}
-
-fn resolve_qualified_type(
-    generic_names: &[String],
-    r#type: &mut ast::QualifiedType,
-    scope: Option<&ClassCell>,
-    local_index_tree: &LocalIndexTree,
-) {
-    if r#type.len() == 1
-        && let TypeName::Ident(ident) = &r#type[0].name
-        && generic_names.contains(ident)
-    {
-        r#type.last_mut().unwrap().name = ast::TypeName::ResolvedGeneric(ident.clone());
-        return;
-    }
-
-    if let Some(last) = r#type.last_mut()
-        && !last.generics.is_empty()
-    {
-        for inner in &mut last.generics {
-            if let TypeGeneric::Type(inner) = inner {
-                resolve_qualified_type(generic_names, inner, scope, local_index_tree);
-            }
-        }
-    }
-
-    let Some(resolved) = local_index_tree.search(scope, r#type) else {
-        if let TypeName::Ident(_) = r#type.last().unwrap().name {
-            debug!(
-                "Failed to resolve type `{}`.",
-                r#type
-                    .iter()
-                    .map(|part| part.to_string())
-                    .collect::<Vec<_>>()
-                    .join(".")
-            );
-        }
-
-        return;
-    };
-
-    r#type.last_mut().unwrap().name = match resolved {
-        ResolvedType::Class(class_cell) => ast::TypeName::ResolvedClass(class_cell),
-        ResolvedType::Interface(interface_cell) => ast::TypeName::ResolvedInterface(interface_cell),
-    };
-}
-
-/// ChildPtr -> ParentPtr
-fn resolve_class_type_names(
-    items: &[(ClassCell, &LocalIndexTree)],
-    progress: &AtomicUsize,
-    total: usize,
-) {
-    items.par_iter().for_each(|(class_cell, local_index_tree)| {
-        let mut class = class_cell.borrow_mut();
-
-        let generics = collect_generic_names(&class.generics);
-
-        if let Some(extends) = &mut class.extends {
-            resolve_qualified_type(&generics, extends, Some(class_cell), local_index_tree);
-        }
-
-        for implement in &mut class.implements {
-            resolve_qualified_type(&generics, implement, Some(class_cell), local_index_tree);
-        }
-
-        for variable in &mut class.variables {
-            resolve_qualified_type(
-                &generics,
-                &mut variable.r#type,
-                Some(class_cell),
-                local_index_tree,
-            );
-        }
-
-        for function in &mut class.functions {
-            let mut function_generics = generics.clone();
-            function_generics.extend(collect_generic_names(&function.generics));
-
-            if function.ident == "__ctor" && function.return_type.len() == 1 {
-                function.return_type.last_mut().unwrap().name =
-                    TypeName::ResolvedClass(class_cell.clone());
-            } else {
-                resolve_qualified_type(
-                    &function_generics,
-                    &mut function.return_type,
-                    Some(class_cell),
-                    local_index_tree,
-                );
-            }
-
-            for argument in &mut function.arguments {
-                resolve_qualified_type(
-                    &function_generics,
-                    &mut argument.r#type,
-                    Some(class_cell),
-                    local_index_tree,
-                );
-            }
-        }
-        update_parallel_progress("Resolving", progress, total, class_cell.ident());
-    });
-}
-
-fn resolve_interface_type_names(
-    items: &[(InterfaceCell, &LocalIndexTree)],
-    progress: &AtomicUsize,
-    total: usize,
-) {
-    items
-        .par_iter()
-        .for_each(|(interface_cell, local_index_tree)| {
-            let mut interface = interface_cell.borrow_mut();
-            let generics = collect_generic_names(&interface.generics);
-
-            for extend in &mut interface.extends {
-                resolve_qualified_type(&generics, extend, None, local_index_tree);
-            }
-
-            for variable in &mut interface.variables {
-                resolve_qualified_type(&generics, &mut variable.r#type, None, local_index_tree);
-            }
-
-            for function in &mut interface.functions {
-                let mut function_generics = generics.clone();
-                function_generics.extend(collect_generic_names(&function.generics));
-
-                resolve_qualified_type(
-                    &function_generics,
-                    &mut function.return_type,
-                    None,
-                    local_index_tree,
-                );
-
-                for argument in &mut function.arguments {
-                    resolve_qualified_type(
-                        &function_generics,
-                        &mut argument.r#type,
-                        None,
-                        local_index_tree,
-                    );
-                }
-            }
-            update_parallel_progress("Resolving", progress, total, interface_cell.ident());
-        });
-}
-
-fn resolve_enum_type_names(
-    items: &[(EnumCell, &LocalIndexTree)],
-    progress: &AtomicUsize,
-    total: usize,
-) {
-    items.par_iter().for_each(|(enum_cell, local_index_tree)| {
-        let mut r#enum = enum_cell.borrow_mut();
-        let generics = collect_generic_names(&r#enum.generics);
-
-        for implement in &mut r#enum.implements {
-            resolve_qualified_type(&generics, implement, None, local_index_tree);
-        }
-
-        for variable in &mut r#enum.variables {
-            resolve_qualified_type(&generics, &mut variable.r#type, None, local_index_tree);
-        }
-
-        for function in &mut r#enum.functions {
-            let mut function_generics = generics.clone();
-            function_generics.extend(collect_generic_names(&function.generics));
-
-            resolve_qualified_type(
-                &function_generics,
-                &mut function.return_type,
-                None,
-                local_index_tree,
-            );
-
-            for argument in &mut function.arguments {
-                resolve_qualified_type(
-                    &function_generics,
-                    &mut argument.r#type,
-                    None,
-                    local_index_tree,
-                );
-            }
-        }
-        update_parallel_progress("Resolving", progress, total, enum_cell.ident());
-    });
-}
-
-fn collect_scoped_classes<'a, T: IntoIterator<Item = &'a Scope>>(
-    scopes: T,
-) -> Box<[(ClassCell, &'a LocalIndexTree)]> {
-    let mut classes: Vec<(ClassCell, &'a LocalIndexTree)> = Vec::new();
-
-    fn walk_interface<'a>(
-        classes: &mut Vec<(ClassCell, &'a LocalIndexTree)>,
-        local_index_tree: &'a LocalIndexTree,
-        interface_cell: &InterfaceCell,
-    ) {
-        for class in &interface_cell.borrow().classes {
-            walk_class(classes, local_index_tree, class);
-        }
-
-        for interface in &interface_cell.borrow().interfaces {
-            walk_interface(classes, local_index_tree, interface);
-        }
-
-        for r#enum in &interface_cell.borrow().enums {
-            walk_enum(classes, local_index_tree, r#enum);
-        }
-    }
-
-    fn walk_class<'a>(
-        classes: &mut Vec<(ClassCell, &'a LocalIndexTree)>,
-        local_index_tree: &'a LocalIndexTree,
-        class_cell: &ClassCell,
-    ) {
-        classes.push((class_cell.clone(), local_index_tree));
-
-        for class in &class_cell.borrow().classes {
-            walk_class(classes, local_index_tree, class);
-        }
-
-        for interface in &class_cell.borrow().interfaces {
-            walk_interface(classes, local_index_tree, interface);
-        }
-
-        for r#enum in &class_cell.borrow().enums {
-            walk_enum(classes, local_index_tree, r#enum);
-        }
-    }
-
-    fn walk_enum<'a>(
-        classes: &mut Vec<(ClassCell, &'a LocalIndexTree)>,
-        local_index_tree: &'a LocalIndexTree,
-        enum_cell: &EnumCell,
-    ) {
-        for class in &enum_cell.borrow().classes {
-            walk_class(classes, local_index_tree, class);
-        }
-
-        for interface in &enum_cell.borrow().interfaces {
-            walk_interface(classes, local_index_tree, interface);
-        }
-
-        for r#enum in &enum_cell.borrow().enums {
-            walk_enum(classes, local_index_tree, r#enum);
-        }
-    }
-
-    for scope in scopes {
-        for interface in &scope.ast.interfaces {
-            walk_interface(&mut classes, &scope.local_index_tree, interface);
-        }
-
-        for class in &scope.ast.classes {
-            walk_class(&mut classes, &scope.local_index_tree, class);
-        }
-
-        for r#enum in &scope.ast.enums {
-            walk_enum(&mut classes, &scope.local_index_tree, r#enum);
-        }
-    }
-
-    classes.into_boxed_slice()
-}
-
-fn collect_scoped_interfaces<'a, T: IntoIterator<Item = &'a Scope>>(
-    scopes: T,
-) -> Box<[(InterfaceCell, &'a LocalIndexTree)]> {
-    let mut interfaces: Vec<(InterfaceCell, &'a LocalIndexTree)> = Vec::new();
-
-    fn walk_interface<'a>(
-        interfaces: &mut Vec<(InterfaceCell, &'a LocalIndexTree)>,
-        local_index_tree: &'a LocalIndexTree,
-        interface_cell: &InterfaceCell,
-    ) {
-        interfaces.push((interface_cell.clone(), local_index_tree));
-
-        for class in &interface_cell.borrow().classes {
-            walk_class(interfaces, local_index_tree, class);
-        }
-
-        for interface in &interface_cell.borrow().interfaces {
-            walk_interface(interfaces, local_index_tree, interface);
-        }
-
-        for r#enum in &interface_cell.borrow().enums {
-            walk_enum(interfaces, local_index_tree, r#enum);
-        }
-    }
-
-    fn walk_class<'a>(
-        interfaces: &mut Vec<(InterfaceCell, &'a LocalIndexTree)>,
-        local_index_tree: &'a LocalIndexTree,
-        class_cell: &ClassCell,
-    ) {
-        for interface in &class_cell.borrow().interfaces {
-            walk_interface(interfaces, local_index_tree, interface);
-        }
-
-        for class in &class_cell.borrow().classes {
-            walk_class(interfaces, local_index_tree, class);
-        }
-
-        for r#enum in &class_cell.borrow().enums {
-            walk_enum(interfaces, local_index_tree, r#enum);
-        }
-    }
-
-    fn walk_enum<'a>(
-        interfaces: &mut Vec<(InterfaceCell, &'a LocalIndexTree)>,
-        local_index_tree: &'a LocalIndexTree,
-        enum_cell: &EnumCell,
-    ) {
-        for interface in &enum_cell.borrow().interfaces {
-            walk_interface(interfaces, local_index_tree, interface);
-        }
-
-        for class in &enum_cell.borrow().classes {
-            walk_class(interfaces, local_index_tree, class);
-        }
-
-        for r#enum in &enum_cell.borrow().enums {
-            walk_enum(interfaces, local_index_tree, r#enum);
-        }
-    }
-
-    for scope in scopes {
-        for interface in &scope.ast.interfaces {
-            walk_interface(&mut interfaces, &scope.local_index_tree, interface);
-        }
-
-        for class in &scope.ast.classes {
-            walk_class(&mut interfaces, &scope.local_index_tree, class);
-        }
-
-        for r#enum in &scope.ast.enums {
-            walk_enum(&mut interfaces, &scope.local_index_tree, r#enum);
-        }
-    }
-
-    interfaces.into_boxed_slice()
-}
-
-fn collect_scoped_enums<'a, T: IntoIterator<Item = &'a Scope>>(
-    scopes: T,
-) -> Box<[(EnumCell, &'a LocalIndexTree)]> {
-    let mut enums: Vec<(EnumCell, &'a LocalIndexTree)> = Vec::new();
-
-    fn walk_enum<'a>(
-        enums: &mut Vec<(EnumCell, &'a LocalIndexTree)>,
-        local_index_tree: &'a LocalIndexTree,
-        enum_cell: &EnumCell,
-    ) {
-        enums.push((enum_cell.clone(), local_index_tree));
-
-        for class in &enum_cell.borrow().classes {
-            walk_class(enums, local_index_tree, class);
-        }
-
-        for interface in &enum_cell.borrow().interfaces {
-            walk_interface(enums, local_index_tree, interface);
-        }
-
-        for r#enum in &enum_cell.borrow().enums {
-            walk_enum(enums, local_index_tree, r#enum);
-        }
-    }
-
-    fn walk_class<'a>(
-        enums: &mut Vec<(EnumCell, &'a LocalIndexTree)>,
-        local_index_tree: &'a LocalIndexTree,
-        class_cell: &ClassCell,
-    ) {
-        for r#enum in &class_cell.borrow().enums {
-            walk_enum(enums, local_index_tree, r#enum);
-        }
-
-        for class in &class_cell.borrow().classes {
-            walk_class(enums, local_index_tree, class);
-        }
-
-        for interface in &class_cell.borrow().interfaces {
-            walk_interface(enums, local_index_tree, interface);
-        }
-    }
-
-    fn walk_interface<'a>(
-        enums: &mut Vec<(EnumCell, &'a LocalIndexTree)>,
-        local_index_tree: &'a LocalIndexTree,
-        interface_cell: &InterfaceCell,
-    ) {
-        for r#enum in &interface_cell.borrow().enums {
-            walk_enum(enums, local_index_tree, r#enum);
-        }
-
-        for class in &interface_cell.borrow().classes {
-            walk_class(enums, local_index_tree, class);
-        }
-
-        for interface in &interface_cell.borrow().interfaces {
-            walk_interface(enums, local_index_tree, interface);
-        }
-    }
-
-    for scope in scopes {
-        for r#enum in &scope.ast.enums {
-            walk_enum(&mut enums, &scope.local_index_tree, r#enum);
-        }
-
-        for class in &scope.ast.classes {
-            walk_class(&mut enums, &scope.local_index_tree, class);
-        }
-
-        for interface in &scope.ast.interfaces {
-            walk_interface(&mut enums, &scope.local_index_tree, interface);
-        }
-    }
-
-    enums.into_boxed_slice()
-}
-
-fn collect_generic_names(generics: &[ast::GenericDefinition]) -> Vec<String> {
-    generics.iter().map(|g| g.ident.clone()).collect()
+    java_ast_parser::parse_owned(data).map(Root::new)
 }
 
 #[derive(Debug)]
 pub struct Scope {
-    pub ast: Arc<ast::Root>,
+    pub ast: Arc<Root>,
     pub local_index_tree: LocalIndexTree,
 }
 
 impl Scope {
-    pub fn from_roots(roots: &[Arc<ast::Root>]) -> Box<[Self]> {
+    pub fn from_roots(roots: &[Arc<Root>], exclusions: &Exclusions) -> Box<[Self]> {
         status::update(&format!("Indexing Trees 0/{}", roots.len()));
         let package_index_trees = {
             let progress = AtomicUsize::new(0);
             let package_index_trees = roots
                 .par_iter()
                 .map(|root| {
-                    let tree = PackageIndexTree::from_ast(root);
-                    let label = package_label(&root.package);
+                    let tree = PackageIndexTree::from_ast(root, exclusions);
+                    let label = package_label(root.ast().package);
                     update_parallel_progress("Indexing Trees", &progress, roots.len(), label);
                     tree
                 })
                 .collect::<Vec<_>>();
 
-            let mut groups: HashMap<String, PackageIndexTree> = HashMap::new();
+            let mut groups: HashMap<String, PackageIndexTree> =
+                HashMap::with_capacity(package_index_trees.len());
 
             for package_index_tree in package_index_trees {
                 if let Some(target_index_tree) = groups.get_mut(package_index_tree.package()) {
@@ -487,25 +60,23 @@ impl Scope {
         };
 
         let global_index_tree = Arc::new(GlobalIndexTree::from_iter(package_index_trees.values()));
-        let shared_package_indices = package_index_trees
-            .iter()
-            .map(|(package, index_tree)| (package.clone(), index_tree.shared_local_index()))
-            .collect::<HashMap<_, _>>();
+        let mut shared_package_indices = HashMap::with_capacity(package_index_trees.len());
+        for (package, index_tree) in &package_index_trees {
+            shared_package_indices.insert(package.clone(), index_tree.shared_local_index());
+        }
 
         status::update(&format!("Indexing Scopes 0/{}", roots.len()));
         let progress = AtomicUsize::new(0);
         roots
             .par_iter()
             .map(|root| {
+                let ast = root.ast();
                 let imported_index_tree = ImportedIndexTree::from_imports(
-                    root.imports.iter().map(|x| x.as_str()),
+                    ast.imports.iter().copied(),
                     global_index_tree.clone(),
                 );
 
-                let shared_local_index = shared_package_indices
-                    .get(root.package.as_str())
-                    .unwrap()
-                    .clone();
+                let shared_local_index = shared_package_indices.get(ast.package).unwrap().clone();
 
                 let local_index_tree = LocalIndexTree::new(
                     global_index_tree.clone(),
@@ -513,7 +84,7 @@ impl Scope {
                     shared_local_index,
                 );
 
-                let label = package_label(&root.package);
+                let label = package_label(ast.package);
                 update_parallel_progress("Indexing Scopes", &progress, roots.len(), label);
 
                 Scope {
@@ -526,23 +97,8 @@ impl Scope {
     }
 }
 
-pub fn preprocess_asts(roots: &[Arc<ast::Root>]) {
-    let scopes = Scope::from_roots(roots);
-
-    let scoped_classes = collect_scoped_classes(&scopes);
-    let scoped_interfaces = collect_scoped_interfaces(&scopes);
-    let scoped_enums = collect_scoped_enums(&scopes);
-
-    let total = scoped_classes.len() + scoped_interfaces.len() + scoped_enums.len();
-    if total == 0 {
-        return;
-    }
-
-    status::update(&format!("Resolving 0/{}", total));
-    let progress = AtomicUsize::new(0);
-    resolve_class_type_names(&scoped_classes, &progress, total);
-    resolve_interface_type_names(&scoped_interfaces, &progress, total);
-    resolve_enum_type_names(&scoped_enums, &progress, total);
+pub fn preprocess_asts(roots: &[Arc<Root>], exclusions: &Exclusions) -> Box<[Scope]> {
+    Scope::from_roots(roots, exclusions)
 }
 
 fn package_label(package: &str) -> &str {

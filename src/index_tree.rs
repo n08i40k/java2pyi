@@ -1,4 +1,4 @@
-use java_ast_parser::ast::{self, ClassCell, EnumCell, GetIdent, InterfaceCell, Root};
+use java_ast_parser::ast;
 use orx_tree::{Bfs, Dyn, DynTree, NodeIdx, NodeRef};
 use std::{
     collections::{HashMap, HashSet},
@@ -6,26 +6,24 @@ use std::{
     sync::Arc,
 };
 
+use crate::model::{
+    ClassRef, EnumRef, Exclusions, InterfaceRef, ResolvedType, Root, TypeRef, qualified_type_idents,
+};
+
 #[derive(Debug, Clone)]
 pub enum TreeNode {
     Root,
     Package(Arc<String>),
-    Class(ClassCell),
-    Enum(EnumCell),
-    Interface(InterfaceCell),
-}
-
-#[derive(Debug, Clone)]
-pub enum ResolvedType {
-    Class(ClassCell),
-    Interface(InterfaceCell),
+    Class(ClassRef),
+    Enum(EnumRef),
+    Interface(InterfaceRef),
 }
 
 impl ResolvedType {
     fn from_node(node: &TreeNode) -> Option<Self> {
         match node {
-            TreeNode::Class(class_cell) => Some(Self::Class(class_cell.clone())),
-            TreeNode::Interface(interface_cell) => Some(Self::Interface(interface_cell.clone())),
+            TreeNode::Class(class_cell) => Some(Self::Class(*class_cell)),
+            TreeNode::Interface(interface_cell) => Some(Self::Interface(*interface_cell)),
             _ => None,
         }
     }
@@ -71,21 +69,21 @@ impl From<&str> for TreeNode {
     }
 }
 
-impl From<&ClassCell> for TreeNode {
-    fn from(value: &ClassCell) -> Self {
-        Self::Class(value.clone())
+impl From<ClassRef> for TreeNode {
+    fn from(value: ClassRef) -> Self {
+        Self::Class(value)
     }
 }
 
-impl From<&InterfaceCell> for TreeNode {
-    fn from(value: &InterfaceCell) -> Self {
-        Self::Interface(value.clone())
+impl From<InterfaceRef> for TreeNode {
+    fn from(value: InterfaceRef) -> Self {
+        Self::Interface(value)
     }
 }
 
-impl From<&EnumCell> for TreeNode {
-    fn from(value: &EnumCell) -> Self {
-        Self::Enum(value.clone())
+impl From<EnumRef> for TreeNode {
+    fn from(value: EnumRef) -> Self {
+        Self::Enum(value)
     }
 }
 pub type IndexTree = DynTree<TreeNode>;
@@ -93,7 +91,7 @@ pub type IndexTree = DynTree<TreeNode>;
 #[derive(Debug, Clone)]
 pub struct SharedLocalIndex {
     tree: Arc<IndexTree>,
-    reverse_local: Arc<HashMap<ClassCell, NodeIdx<Dyn<TreeNode>>>>,
+    reverse_local: Arc<HashMap<ClassRef, NodeIdx<Dyn<TreeNode>>>>,
 }
 
 #[derive(Debug, Clone)]
@@ -151,12 +149,17 @@ pub fn merge_index_trees(
 }
 
 impl PackageIndexTree {
-    pub fn from_ast(ast: &Root) -> Self {
+    pub fn from_ast(root: &Root, exclusions: &Exclusions) -> Self {
         fn walk_interface(
             tree: &mut DynTree<TreeNode>,
             parent_idx: NodeIdx<Dyn<TreeNode>>,
-            self_cell: &InterfaceCell,
+            self_cell: InterfaceRef,
+            exclusions: &Exclusions,
         ) {
+            if exclusions.contains(TypeRef::Interface(self_cell)) {
+                return;
+            }
+
             let self_idx = {
                 let mut parent_mut = tree.node_mut(parent_idx);
                 parent_mut.push_child(TreeNode::from(self_cell))
@@ -164,24 +167,29 @@ impl PackageIndexTree {
 
             let self_ref = self_cell.borrow();
 
-            for class_cell in &self_ref.classes {
-                walk_class(tree, self_idx, class_cell);
+            for class_cell in self_ref.classes.iter().map(ClassRef::new) {
+                walk_class(tree, self_idx, class_cell, exclusions);
             }
 
-            for interface_cell in &self_ref.interfaces {
-                walk_interface(tree, self_idx, interface_cell);
+            for interface_cell in self_ref.interfaces.iter().map(InterfaceRef::new) {
+                walk_interface(tree, self_idx, interface_cell, exclusions);
             }
 
-            for enum_cell in &self_ref.enums {
-                walk_enum(tree, self_idx, enum_cell);
+            for enum_cell in self_ref.enums.iter().map(EnumRef::new) {
+                walk_enum(tree, self_idx, enum_cell, exclusions);
             }
         }
 
         fn walk_class(
             tree: &mut DynTree<TreeNode>,
             parent_idx: NodeIdx<Dyn<TreeNode>>,
-            self_cell: &ClassCell,
+            self_cell: ClassRef,
+            exclusions: &Exclusions,
         ) {
+            if exclusions.contains(TypeRef::Class(self_cell)) {
+                return;
+            }
+
             let self_idx = {
                 let mut parent_mut = tree.node_mut(parent_idx);
                 parent_mut.push_child(TreeNode::from(self_cell))
@@ -189,24 +197,29 @@ impl PackageIndexTree {
 
             let self_ref = self_cell.borrow();
 
-            for class_cell in &self_ref.classes {
-                walk_class(tree, self_idx, class_cell);
+            for class_cell in self_ref.classes.iter().map(ClassRef::new) {
+                walk_class(tree, self_idx, class_cell, exclusions);
             }
 
-            for interface_cell in &self_ref.interfaces {
-                walk_interface(tree, self_idx, interface_cell);
+            for interface_cell in self_ref.interfaces.iter().map(InterfaceRef::new) {
+                walk_interface(tree, self_idx, interface_cell, exclusions);
             }
 
-            for enum_cell in &self_ref.enums {
-                walk_enum(tree, self_idx, enum_cell);
+            for enum_cell in self_ref.enums.iter().map(EnumRef::new) {
+                walk_enum(tree, self_idx, enum_cell, exclusions);
             }
         }
 
         fn walk_enum(
             tree: &mut DynTree<TreeNode>,
             parent_idx: NodeIdx<Dyn<TreeNode>>,
-            self_cell: &EnumCell,
+            self_cell: EnumRef,
+            exclusions: &Exclusions,
         ) {
+            if exclusions.contains(TypeRef::Enum(self_cell)) {
+                return;
+            }
+
             let self_idx = {
                 let mut parent_mut = tree.node_mut(parent_idx);
                 parent_mut.push_child(TreeNode::from(self_cell))
@@ -214,32 +227,33 @@ impl PackageIndexTree {
 
             let self_ref = self_cell.borrow();
 
-            for class_cell in &self_ref.classes {
-                walk_class(tree, self_idx, class_cell);
+            for class_cell in self_ref.classes.iter().map(ClassRef::new) {
+                walk_class(tree, self_idx, class_cell, exclusions);
             }
 
-            for interface_cell in &self_ref.interfaces {
-                walk_interface(tree, self_idx, interface_cell);
+            for interface_cell in self_ref.interfaces.iter().map(InterfaceRef::new) {
+                walk_interface(tree, self_idx, interface_cell, exclusions);
             }
 
-            for enum_cell in &self_ref.enums {
-                walk_enum(tree, self_idx, enum_cell);
+            for enum_cell in self_ref.enums.iter().map(EnumRef::new) {
+                walk_enum(tree, self_idx, enum_cell, exclusions);
             }
         }
 
         let mut tree = DynTree::new(TreeNode::Root);
         let root_idx = tree.root().idx();
+        let ast = root.ast();
 
-        for interface_cell in &ast.interfaces {
-            walk_interface(&mut tree, root_idx, interface_cell);
+        for interface_cell in ast.interfaces.iter().map(InterfaceRef::new) {
+            walk_interface(&mut tree, root_idx, interface_cell, exclusions);
         }
 
-        for class_cell in &ast.classes {
-            walk_class(&mut tree, root_idx, class_cell);
+        for class_cell in ast.classes.iter().map(ClassRef::new) {
+            walk_class(&mut tree, root_idx, class_cell, exclusions);
         }
 
-        for enum_cell in &ast.enums {
-            walk_enum(&mut tree, root_idx, enum_cell);
+        for enum_cell in ast.enums.iter().map(EnumRef::new) {
+            walk_enum(&mut tree, root_idx, enum_cell, exclusions);
         }
 
         Self {
@@ -268,7 +282,7 @@ impl PackageIndexTree {
                 continue;
             };
 
-            reverse_local.insert(class_cell.clone(), idx);
+            reverse_local.insert(*class_cell, idx);
         }
 
         SharedLocalIndex {
@@ -339,13 +353,7 @@ impl GlobalIndexTree {
         let mut current_idx = self.0.root().idx();
 
         for ident in query {
-            let node_idx = self.0.node(current_idx).children().find_map(|x| {
-                if x.data().ident().is_some_and(|x| x == ident) {
-                    Some(x.idx())
-                } else {
-                    None
-                }
-            })?;
+            let node_idx = find_child(&self.0, current_idx, ident)?;
 
             current_idx = node_idx;
         }
@@ -353,17 +361,8 @@ impl GlobalIndexTree {
         ResolvedType::from_node(self.0.node(current_idx).data())
     }
 
-    pub fn search(&self, query: &ast::QualifiedType) -> Option<ResolvedType> {
-        let parts = query
-            .iter()
-            .map(|query_part| {
-                let ast::TypeName::Ident(ident) = &query_part.name else {
-                    return None;
-                };
-
-                Some(ident.as_str())
-            })
-            .collect::<Option<Vec<_>>>()?;
+    pub fn search(&self, query: &ast::QualifiedType<'_>) -> Option<ResolvedType> {
+        let parts = qualified_type_idents(query)?;
 
         self.search_path(parts)
     }
@@ -372,7 +371,13 @@ impl GlobalIndexTree {
 #[derive(Debug, Clone)]
 pub struct ImportedIndexTree {
     global: Arc<GlobalIndexTree>,
-    imports: Box<[String]>,
+    imports: Box<[ImportPath]>,
+}
+
+#[derive(Debug, Clone)]
+enum ImportPath {
+    Wildcard { prefix: Box<[String]> },
+    Exact { first: String, parts: Box<[String]> },
 }
 
 impl ImportedIndexTree {
@@ -380,12 +385,24 @@ impl ImportedIndexTree {
     where
         I: IntoIterator<Item = &'a str>,
     {
-        let mut seen = HashSet::new();
-        let mut imports = Vec::new();
-        for import in import_iter {
-            let import = import.to_string();
-            if seen.insert(import.clone()) {
-                imports.push(import);
+        let iter = import_iter.into_iter();
+        let (lower_bound, _) = iter.size_hint();
+        let mut seen = HashSet::with_capacity(lower_bound);
+        let mut imports = Vec::with_capacity(lower_bound);
+        for import in iter {
+            if !seen.insert(import) {
+                continue;
+            }
+
+            if let Some(prefix) = import.strip_suffix(".*") {
+                imports.push(ImportPath::Wildcard {
+                    prefix: split_import(prefix),
+                });
+            } else {
+                let parts = split_import(import);
+                if let Some(first) = parts.last().cloned() {
+                    imports.push(ImportPath::Exact { first, parts });
+                }
             }
         }
 
@@ -395,41 +412,28 @@ impl ImportedIndexTree {
         }
     }
 
-    pub fn search(&self, query: &ast::QualifiedType) -> Option<ResolvedType> {
-        let query_parts = query
-            .iter()
-            .map(|query_part| {
-                let ast::TypeName::Ident(ident) = &query_part.name else {
-                    return None;
-                };
-
-                Some(ident.as_str())
-            })
-            .collect::<Option<Vec<_>>>()?;
+    pub fn search(&self, query: &ast::QualifiedType<'_>) -> Option<ResolvedType> {
+        let query_parts = qualified_type_idents(query)?;
+        let first_query_part = query_parts.clone().next()?;
 
         for import in &self.imports {
-            if let Some(prefix) = import.strip_suffix(".*") {
-                let resolved = self
+            let resolved = match import {
+                ImportPath::Wildcard { prefix } => self
                     .global
-                    .search_path(prefix.split('.').chain(query_parts.iter().copied()));
+                    .search_path(prefix.iter().map(String::as_str).chain(query_parts.clone())),
+                ImportPath::Exact { first, parts } => {
+                    if first.as_str() != first_query_part {
+                        continue;
+                    }
 
-                if resolved.is_some() {
-                    return resolved;
+                    self.global.search_path(
+                        parts[..parts.len().saturating_sub(1)]
+                            .iter()
+                            .map(String::as_str)
+                            .chain(query_parts.clone()),
+                    )
                 }
-                continue;
-            }
-
-            let import_parts = import.split('.').collect::<Vec<_>>();
-            if import_parts.last().copied() != query_parts.first().copied() {
-                continue;
-            }
-
-            let resolved = self.global.search_path(
-                import_parts[..import_parts.len().saturating_sub(1)]
-                    .iter()
-                    .copied()
-                    .chain(query_parts.iter().copied()),
-            );
+            };
 
             if resolved.is_some() {
                 return resolved;
@@ -445,7 +449,7 @@ pub struct LocalIndexTree {
     global: Arc<GlobalIndexTree>,
     imported: ImportedIndexTree,
     local: Arc<IndexTree>,
-    reverse_local: Arc<HashMap<ClassCell, NodeIdx<Dyn<TreeNode>>>>,
+    reverse_local: Arc<HashMap<ClassRef, NodeIdx<Dyn<TreeNode>>>>,
 }
 
 impl LocalIndexTree {
@@ -462,70 +466,80 @@ impl LocalIndexTree {
         }
     }
 
-    pub fn search_global(&self, query: &ast::QualifiedType) -> Option<ResolvedType> {
+    pub fn search_global(&self, query: &ast::QualifiedType<'_>) -> Option<ResolvedType> {
         self.global.search(query)
     }
 
-    pub fn search_imported(&self, query: &ast::QualifiedType) -> Option<ResolvedType> {
+    pub fn search_imported(&self, query: &ast::QualifiedType<'_>) -> Option<ResolvedType> {
         self.imported.search(query)
     }
 
     pub fn search_local(
         &self,
-        scope: Option<&ClassCell>,
-        query: &ast::QualifiedType,
+        scope: Option<ClassRef>,
+        query: &ast::QualifiedType<'_>,
     ) -> Option<ResolvedType> {
-        let root_idx = scope
-            .and_then(|x| self.reverse_local.get(x))
-            .cloned()
-            .unwrap_or_else(|| self.local.root().idx());
+        let query_parts = qualified_type_idents(query)?;
+        let mut current_scope = scope;
 
-        let try_parent = || {
-            scope?;
+        loop {
+            let root_idx = current_scope
+                .and_then(|x| self.reverse_local.get(&x))
+                .cloned()
+                .unwrap_or_else(|| self.local.root().idx());
+            let mut current_idx = root_idx;
+            let mut matched = true;
 
-            if let Some(parent_node) = self.local.node(root_idx).parent() {
-                let scope = if let TreeNode::Class(class_cell) = parent_node.data() {
-                    Some(class_cell)
-                } else {
-                    None
+            for ident in query_parts.clone() {
+                let Some(node_idx) = find_child(&self.local, current_idx, ident) else {
+                    matched = false;
+                    break;
                 };
 
-                self.search_local(scope, query)
+                current_idx = node_idx;
+            }
+
+            if matched
+                && let Some(resolved) = ResolvedType::from_node(self.local.node(current_idx).data())
+            {
+                return Some(resolved);
+            }
+
+            current_scope?;
+            let parent_node = self.local.node(root_idx).parent()?;
+            current_scope = if let TreeNode::Class(class_cell) = parent_node.data() {
+                Some(*class_cell)
             } else {
                 None
-            }
-        };
-
-        let mut current_idx = root_idx;
-
-        for query_part in query.iter() {
-            let ast::TypeName::Ident(ident) = &query_part.name else {
-                return None;
             };
-
-            let Some(node_idx) = self.local.node(current_idx).children().find_map(|x| {
-                if x.data().ident().is_some_and(|x| x == ident) {
-                    Some(x.idx())
-                } else {
-                    None
-                }
-            }) else {
-                return try_parent();
-            };
-
-            current_idx = node_idx;
         }
-
-        ResolvedType::from_node(self.local.node(current_idx).data()).or_else(try_parent)
     }
 
     pub fn search(
         &self,
-        scope: Option<&ClassCell>,
-        query: &ast::QualifiedType,
+        scope: Option<ClassRef>,
+        query: &ast::QualifiedType<'_>,
     ) -> Option<ResolvedType> {
         self.search_local(scope, query)
             .or_else(|| self.search_imported(query))
             .or_else(|| self.search_global(query))
     }
+}
+
+fn find_child(
+    tree: &IndexTree,
+    parent_idx: NodeIdx<Dyn<TreeNode>>,
+    ident: &str,
+) -> Option<NodeIdx<Dyn<TreeNode>>> {
+    tree.node(parent_idx).children().find_map(|child| {
+        if child.data().ident() == Some(ident) {
+            Some(child.idx())
+        } else {
+            None
+        }
+    })
+}
+
+fn split_import(import: &str) -> Box<[String]> {
+    import.split('.').map(str::to_string).collect()
 }

@@ -4,10 +4,7 @@ use std::{
     collections::{HashMap, HashSet},
     env, fs,
     path::{Path, PathBuf},
-    sync::{
-        Arc,
-        atomic::{AtomicUsize, Ordering},
-    },
+    sync::Arc,
 };
 
 use rayon::{
@@ -15,12 +12,12 @@ use rayon::{
     iter::{IndexedParallelIterator, IntoParallelRefIterator, ParallelIterator},
 };
 
-use java_ast_parser::ast::{ClassCell, EnumCell, GetIdent, InterfaceCell, Root};
-
+use crate::model::{ClassRef, EnumRef, Exclusions, InterfaceRef, Root, TypeRef};
 use crate::preprocess::{parse_java_ast, preprocess_asts};
-use crate::pyi::generate_pyi_by_package;
+use crate::pyi::write_pyi_by_package;
 
 mod index_tree;
+mod model;
 mod preprocess;
 mod pyi;
 mod status;
@@ -70,13 +67,11 @@ fn main() {
         .unwrap();
 
     let asts = {
-        let mut result = Vec::new();
-
-        let parse_results = worker_pool.install(|| {
+        let parse_result = worker_pool.install(|| {
             files
                 .par_iter()
                 .enumerate()
-                .map(|(index, file)| {
+                .filter_map(|(index, file)| {
                     let display_name = file
                         .file_name()
                         .and_then(|name| name.to_str())
@@ -91,32 +86,27 @@ fn main() {
                     ));
 
                     match parse_java_ast(file) {
-                        Ok(ast) => Ok(Some(Arc::new(ast))),
+                        Ok(ast) => Some(Ok(Arc::new(ast))),
                         Err(e) => match &e.inner {
-                            java_ast_parser::Error::UnrecognizedEof { .. } => Ok(None),
-                            _ => Err((file.display().to_string(), e.to_string())),
+                            java_ast_parser::Error::UnrecognizedEof { .. } => None,
+                            _ => Some(Err((file.display().to_string(), e.to_string()))),
                         },
                     }
                 })
-                .collect::<Vec<_>>()
+                .collect::<Result<Vec<_>, _>>()
         });
 
-        for parse_result in parse_results {
-            match parse_result {
-                Ok(Some(ast)) => result.push(ast),
-                Ok(None) => {}
-                Err((path, error)) => {
-                    status::clear();
-                    eprintln!("failed to parse {}\n{}", path, error);
-                    return;
-                }
+        match parse_result {
+            Ok(asts) => asts,
+            Err((path, error)) => {
+                status::clear();
+                eprintln!("failed to parse {}\n{}", path, error);
+                return;
             }
         }
-
-        result
     };
     let mut asts = asts;
-    apply_type_exclusions(&mut asts, &options);
+    let exclusions = apply_type_exclusions(&mut asts, &options);
 
     if asts.is_empty() {
         status::clear();
@@ -124,18 +114,14 @@ fn main() {
         return;
     }
 
-    worker_pool.install(|| preprocess_asts(&asts));
+    let scopes = worker_pool.install(|| preprocess_asts(&asts, &exclusions));
 
-    let outputs = worker_pool.install(|| generate_pyi_by_package(&asts, options.mixer_records));
-    let output_items = outputs.into_iter().collect::<Vec<_>>();
-
-    let total_outputs = output_items.len();
-    status::update(&format!("Writing 0/{}", total_outputs));
-    let write_progress = AtomicUsize::new(0);
-    let write_results = worker_pool.install(|| {
-        output_items
-            .par_iter()
-            .map(|(package, contents)| {
+    let write_result = worker_pool.install(|| {
+        write_pyi_by_package(
+            &scopes,
+            options.mixer_records,
+            Arc::new(exclusions),
+            |package, contents| {
                 let file_path = package_to_path(&options.out_dir, package);
                 if let Some(parent) = file_path.parent() {
                     fs::create_dir_all(parent)
@@ -146,28 +132,15 @@ fn main() {
                 ensure_parent_inits(&file_path, &options.out_dir)
                     .map_err(|error| (file_path.display().to_string(), error.to_string()))?;
 
-                let completed = write_progress.fetch_add(1, Ordering::Relaxed) + 1;
-                let label = if package.is_empty() {
-                    "<root>"
-                } else {
-                    package.as_str()
-                };
-                status::update(&format!(
-                    "Writing {}/{}: {}",
-                    completed, total_outputs, label
-                ));
-
                 Ok::<(), (String, String)>(())
-            })
-            .collect::<Vec<_>>()
+            },
+        )
     });
 
-    for write_result in write_results {
-        if let Err((path, error)) = write_result {
-            status::clear();
-            eprintln!("failed to write {}\n{}", path, error);
-            return;
-        }
+    if let Err((path, error)) = write_result {
+        status::clear();
+        eprintln!("failed to write {}\n{}", path, error);
+        return;
     }
     status::clear();
 }
@@ -411,105 +384,117 @@ fn qualified_type_path(prefix: &str, ident: &str) -> String {
     }
 }
 
-fn filter_class_cells(
-    cells: &[ClassCell],
+fn collect_excluded_classes(
+    cells: &[java_ast_parser::ast::Class<'_>],
     prefix: &str,
     exclude_identifiers: &HashSet<String>,
-) -> Box<[ClassCell]> {
-    cells
-        .iter()
-        .filter_map(|cell| {
-            let path = qualified_type_path(prefix, cell.ident());
-            if exclude_identifiers.contains(&path) {
-                return None;
-            }
+    exclusions: &mut Exclusions,
+) {
+    for class in cells {
+        let class_ref = ClassRef::new(class);
+        let path = qualified_type_path(prefix, class_ref.ident());
+        if exclude_identifiers.contains(&path) {
+            exclusions.insert(TypeRef::Class(class_ref));
+            continue;
+        }
 
-            {
-                let mut class = cell.borrow_mut();
-                class.classes = filter_class_cells(&class.classes, &path, exclude_identifiers);
-                class.interfaces =
-                    filter_interface_cells(&class.interfaces, &path, exclude_identifiers);
-                class.enums = filter_enum_cells(&class.enums, &path, exclude_identifiers);
-            }
-
-            Some(cell.clone())
-        })
-        .collect()
+        collect_excluded_classes(&class.classes, &path, exclude_identifiers, exclusions);
+        collect_excluded_interfaces(&class.interfaces, &path, exclude_identifiers, exclusions);
+        collect_excluded_enums(&class.enums, &path, exclude_identifiers, exclusions);
+    }
 }
 
-fn filter_interface_cells(
-    cells: &[InterfaceCell],
+fn collect_excluded_interfaces(
+    cells: &[java_ast_parser::ast::Interface<'_>],
     prefix: &str,
     exclude_identifiers: &HashSet<String>,
-) -> Box<[InterfaceCell]> {
-    cells
-        .iter()
-        .filter_map(|cell| {
-            let path = qualified_type_path(prefix, cell.ident());
-            if exclude_identifiers.contains(&path) {
-                return None;
-            }
+    exclusions: &mut Exclusions,
+) {
+    for interface in cells {
+        let interface_ref = InterfaceRef::new(interface);
+        let path = qualified_type_path(prefix, interface_ref.ident());
+        if exclude_identifiers.contains(&path) {
+            exclusions.insert(TypeRef::Interface(interface_ref));
+            continue;
+        }
 
-            {
-                let mut interface = cell.borrow_mut();
-                interface.classes =
-                    filter_class_cells(&interface.classes, &path, exclude_identifiers);
-                interface.interfaces =
-                    filter_interface_cells(&interface.interfaces, &path, exclude_identifiers);
-                interface.enums = filter_enum_cells(&interface.enums, &path, exclude_identifiers);
-            }
-
-            Some(cell.clone())
-        })
-        .collect()
+        collect_excluded_classes(&interface.classes, &path, exclude_identifiers, exclusions);
+        collect_excluded_interfaces(
+            &interface.interfaces,
+            &path,
+            exclude_identifiers,
+            exclusions,
+        );
+        collect_excluded_enums(&interface.enums, &path, exclude_identifiers, exclusions);
+    }
 }
 
-fn filter_enum_cells(
-    cells: &[EnumCell],
+fn collect_excluded_enums(
+    cells: &[java_ast_parser::ast::Enum<'_>],
     prefix: &str,
     exclude_identifiers: &HashSet<String>,
-) -> Box<[EnumCell]> {
-    cells
-        .iter()
-        .filter_map(|cell| {
-            let path = qualified_type_path(prefix, cell.ident());
-            if exclude_identifiers.contains(&path) {
-                return None;
-            }
+    exclusions: &mut Exclusions,
+) {
+    for r#enum in cells {
+        let enum_ref = EnumRef::new(r#enum);
+        let path = qualified_type_path(prefix, enum_ref.ident());
+        if exclude_identifiers.contains(&path) {
+            exclusions.insert(TypeRef::Enum(enum_ref));
+            continue;
+        }
 
-            {
-                let mut r#enum = cell.borrow_mut();
-                r#enum.classes = filter_class_cells(&r#enum.classes, &path, exclude_identifiers);
-                r#enum.interfaces =
-                    filter_interface_cells(&r#enum.interfaces, &path, exclude_identifiers);
-                r#enum.enums = filter_enum_cells(&r#enum.enums, &path, exclude_identifiers);
-            }
-
-            Some(cell.clone())
-        })
-        .collect()
+        collect_excluded_classes(&r#enum.classes, &path, exclude_identifiers, exclusions);
+        collect_excluded_interfaces(&r#enum.interfaces, &path, exclude_identifiers, exclusions);
+        collect_excluded_enums(&r#enum.enums, &path, exclude_identifiers, exclusions);
+    }
 }
 
-fn apply_type_exclusions(asts: &mut Vec<Arc<Root>>, options: &CliOptions) {
+fn apply_type_exclusions(asts: &mut Vec<Arc<Root>>, options: &CliOptions) -> Exclusions {
+    let mut exclusions = Exclusions::default();
     if options.exclude_packages.is_empty() && options.exclude_identifiers.is_empty() {
-        return;
+        return exclusions;
     }
 
-    asts.retain_mut(|ast| {
-        let root = Arc::get_mut(ast).expect("AST root must be uniquely owned before preprocessing");
-        if is_excluded_package(&root.package, &options.exclude_packages) {
+    asts.retain(|root| {
+        let ast = root.ast();
+        if is_excluded_package(ast.package, &options.exclude_packages) {
             return false;
         }
 
-        root.classes =
-            filter_class_cells(&root.classes, &root.package, &options.exclude_identifiers);
-        root.interfaces = filter_interface_cells(
-            &root.interfaces,
-            &root.package,
+        collect_excluded_classes(
+            &ast.classes,
+            ast.package,
             &options.exclude_identifiers,
+            &mut exclusions,
         );
-        root.enums = filter_enum_cells(&root.enums, &root.package, &options.exclude_identifiers);
+        collect_excluded_interfaces(
+            &ast.interfaces,
+            ast.package,
+            &options.exclude_identifiers,
+            &mut exclusions,
+        );
+        collect_excluded_enums(
+            &ast.enums,
+            ast.package,
+            &options.exclude_identifiers,
+            &mut exclusions,
+        );
 
-        !(root.classes.is_empty() && root.interfaces.is_empty() && root.enums.is_empty())
+        ast.classes
+            .iter()
+            .map(ClassRef::new)
+            .any(|class| !exclusions.contains(TypeRef::Class(class)))
+            || ast
+                .interfaces
+                .iter()
+                .map(InterfaceRef::new)
+                .any(|interface| !exclusions.contains(TypeRef::Interface(interface)))
+            || ast
+                .enums
+                .iter()
+                .map(EnumRef::new)
+                .any(|r#enum| !exclusions.contains(TypeRef::Enum(r#enum)))
     });
+
+    exclusions
 }
