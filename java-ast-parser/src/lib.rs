@@ -8,7 +8,7 @@ pub mod ast;
 mod lexer;
 
 lalrpop_mod!(
-    #[allow(clippy::ptr_arg)]
+    #[allow(clippy::ptr_arg, clippy::type_complexity)]
     #[rustfmt::skip]
     java
 );
@@ -200,11 +200,52 @@ impl<'a> std::fmt::Display for ErrorCell<'a> {
     }
 }
 
-pub fn parse<'a>(data: &'a str) -> Result<ast::Root, Box<ErrorCell<'a>>> {
+pub fn parse<'a>(data: &'a str) -> Result<ast::Root<'a>, Box<ErrorCell<'a>>> {
     let lexer = lexer::Lexer::new(data);
     let parser = java::RootParser::new();
 
     parser
         .parse(data, lexer)
         .map_err(|e| Box::new(ErrorCell::new(data, e)))
+}
+
+#[derive(Debug)]
+pub struct RootCell {
+    root: ast::Root<'static>,
+    code: String,
+}
+
+impl RootCell {
+    pub fn new(code: String) -> Result<Self, Box<ErrorCell<'static>>> {
+        let root = match parse(code.as_str()) {
+            Ok(root) => root,
+            Err(error) => return Err(Box::new((*error).into_owned())),
+        };
+
+        // SAFETY: every borrowed string inside `root` points into `code`.
+        // Moving a `String` does not move its heap allocation, and `RootCell`
+        // keeps `code` private so it cannot be mutated or reallocated while
+        // the AST exists. Field order drops `root` before `code`.
+        let root = unsafe { std::mem::transmute::<ast::Root<'_>, ast::Root<'static>>(root) };
+
+        Ok(Self { root, code })
+    }
+
+    pub fn code(&self) -> &str {
+        self.code.as_str()
+    }
+
+    pub fn root<'a>(&'a self) -> &'a ast::Root<'a> {
+        &self.root
+    }
+
+    pub fn into_code(self) -> String {
+        let Self { root, code } = self;
+        drop(root);
+        code
+    }
+}
+
+pub fn parse_owned(code: impl Into<String>) -> Result<RootCell, Box<ErrorCell<'static>>> {
+    RootCell::new(code.into())
 }

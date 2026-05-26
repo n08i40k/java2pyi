@@ -1,70 +1,10 @@
 use bitflags::bitflags;
 use ownable::traits::IntoOwned;
-use std::borrow::Cow;
-use std::ops::Deref;
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::ops::{Deref, DerefMut};
 
 pub trait GetIdent {
     fn ident(&self) -> &str;
 }
-
-#[allow(clippy::mutable_key_type)]
-#[derive(Debug, Clone)]
-pub struct ObjectCell<T: GetIdent>(Arc<String>, Arc<Mutex<T>>);
-
-impl<T: GetIdent> ObjectCell<T> {
-    pub fn borrow(&self) -> MutexGuard<'_, T> {
-        self.1.lock().unwrap()
-    }
-
-    pub fn borrow_mut(&self) -> MutexGuard<'_, T> {
-        self.1.lock().unwrap()
-    }
-}
-
-impl<T: GetIdent> GetIdent for ObjectCell<T> {
-    fn ident(&self) -> &str {
-        self.0.as_str()
-    }
-}
-
-impl<T: GetIdent> From<T> for ObjectCell<T> {
-    fn from(value: T) -> Self {
-        Self(
-            Arc::new(value.ident().to_string()),
-            Arc::new(Mutex::new(value)),
-        )
-    }
-}
-
-impl<T: GetIdent> From<Arc<Mutex<T>>> for ObjectCell<T> {
-    fn from(value: Arc<Mutex<T>>) -> Self {
-        let ident = Arc::new(value.lock().unwrap().ident().to_string());
-        Self(ident, value)
-    }
-}
-
-impl<T: GetIdent> Deref for ObjectCell<T> {
-    type Target = Mutex<T>;
-
-    fn deref(&self) -> &Self::Target {
-        self.1.deref()
-    }
-}
-
-impl<T: GetIdent> std::hash::Hash for ObjectCell<T> {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        std::ptr::hash(Arc::as_ptr(&self.1), state);
-    }
-}
-
-impl<T: GetIdent> std::cmp::PartialEq for ObjectCell<T> {
-    fn eq(&self, other: &Self) -> bool {
-        Arc::as_ptr(&self.1) == Arc::as_ptr(&other.1)
-    }
-}
-
-impl<T: GetIdent> std::cmp::Eq for ObjectCell<T> {}
 
 bitflags! {
     #[derive(Debug, Clone, PartialEq)]
@@ -97,91 +37,94 @@ impl IntoOwned for Modifiers {
     }
 }
 
-#[derive(Clone, PartialEq)]
-pub enum TypeName {
-    Void,
-    Boolean,
-    Byte,
-    Char,
-    Short,
-    Integer,
-    Long,
-    Float,
-    Double,
-    Ident(String),
-    ResolvedGeneric(String),
-    ResolvedClass(ClassCell),
-    ResolvedInterface(InterfaceCell),
-}
+#[derive(Debug, Clone, PartialEq)]
+pub struct QualifiedType<'a>(Box<[Type<'a>]>);
 
-impl std::fmt::Debug for TypeName {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Void => write!(f, "Void"),
-            Self::Boolean => write!(f, "Boolean"),
-            Self::Byte => write!(f, "Byte"),
-            Self::Char => write!(f, "Char"),
-            Self::Short => write!(f, "Short"),
-            Self::Integer => write!(f, "Integer"),
-            Self::Long => write!(f, "Long"),
-            Self::Float => write!(f, "Float"),
-            Self::Double => write!(f, "Double"),
-            Self::Ident(arg0) => f.debug_tuple("Ident").field(arg0).finish(),
-            Self::ResolvedGeneric(arg0) => f.debug_tuple("ResolvedGeneric").field(arg0).finish(),
-            Self::ResolvedClass(arg0) => f
-                .debug_tuple("ResolvedIdent")
-                .field(&arg0.lock().unwrap().ident)
-                .finish(),
-            Self::ResolvedInterface(arg0) => f
-                .debug_tuple("ResolvedInterface")
-                .field(&arg0.lock().unwrap().ident)
-                .finish(),
-        }
+impl<'a> QualifiedType<'a> {
+    pub fn new(items: Box<[Type<'a>]>) -> Self {
+        Self(items)
+    }
+
+    pub fn empty() -> Self {
+        Self(Box::new([]))
+    }
+
+    pub fn into_inner(self) -> Box<[Type<'a>]> {
+        self.0
     }
 }
 
-impl std::fmt::Display for TypeName {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            TypeName::Void => write!(f, "void"),
-            TypeName::Boolean => write!(f, "boolean"),
-            TypeName::Byte => write!(f, "byte"),
-            TypeName::Char => write!(f, "char"),
-            TypeName::Short => write!(f, "short"),
-            TypeName::Integer => write!(f, "int"),
-            TypeName::Long => write!(f, "long"),
-            TypeName::Float => write!(f, "float"),
-            TypeName::Double => write!(f, "double"),
-            TypeName::Ident(ident) => write!(f, "{}", ident),
-            TypeName::ResolvedGeneric(ident) => write!(f, "{}", ident),
-            TypeName::ResolvedClass(class_cell) => write!(f, "{}", class_cell.ident()),
-            TypeName::ResolvedInterface(interface_cell) => write!(f, "{}", interface_cell.ident()),
-        }
+impl<'a> Default for QualifiedType<'a> {
+    fn default() -> Self {
+        Self::empty()
     }
 }
 
-impl TypeName {
-    pub fn resolved_class(&self) -> Option<&ClassCell> {
-        if let Self::ResolvedClass(class_cell) = self {
-            Some(class_cell)
-        } else {
-            None
-        }
+impl<'a> From<Box<[Type<'a>]>> for QualifiedType<'a> {
+    fn from(items: Box<[Type<'a>]>) -> Self {
+        Self::new(items)
+    }
+}
+
+impl<'a, const N: usize> From<[Type<'a>; N]> for QualifiedType<'a> {
+    fn from(items: [Type<'a>; N]) -> Self {
+        Self::new(Box::new(items))
+    }
+}
+
+impl<'a> Deref for QualifiedType<'a> {
+    type Target = [Type<'a>];
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl<'a> DerefMut for QualifiedType<'a> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+impl<'a> IntoIterator for QualifiedType<'a> {
+    type Item = Type<'a>;
+    type IntoIter = std::vec::IntoIter<Type<'a>>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.into_vec().into_iter()
+    }
+}
+
+impl<'a, 'b> IntoIterator for &'b QualifiedType<'a> {
+    type Item = &'b Type<'a>;
+    type IntoIter = std::slice::Iter<'b, Type<'a>>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
+impl<'a, 'b> IntoIterator for &'b mut QualifiedType<'a> {
+    type Item = &'b mut Type<'a>;
+    type IntoIter = std::slice::IterMut<'b, Type<'a>>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter_mut()
     }
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub enum WildcardBoundary {
+pub enum GenericWildcardBoundary<'a> {
     None,
-    Extends(QualifiedType),
-    Super(QualifiedType),
+    Extends(QualifiedType<'a>),
+    Super(QualifiedType<'a>),
 }
 
-impl std::fmt::Display for WildcardBoundary {
+impl<'a> std::fmt::Display for GenericWildcardBoundary<'a> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            WildcardBoundary::None => write!(f, "?"),
-            WildcardBoundary::Extends(items) => write!(
+            GenericWildcardBoundary::None => write!(f, "?"),
+            GenericWildcardBoundary::Extends(items) => write!(
                 f,
                 "? extends {}",
                 items
@@ -190,7 +133,7 @@ impl std::fmt::Display for WildcardBoundary {
                     .collect::<Vec<_>>()
                     .join(".")
             ),
-            WildcardBoundary::Super(items) => write!(
+            GenericWildcardBoundary::Super(items) => write!(
                 f,
                 "? super {}",
                 items
@@ -204,15 +147,27 @@ impl std::fmt::Display for WildcardBoundary {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub enum TypeGeneric {
-    Type(QualifiedType),
-    Wildcard(WildcardBoundary),
+pub enum GenericImpl<'a> {
+    Type(QualifiedType<'a>),
+    Wildcard(GenericWildcardBoundary<'a>),
 }
 
-impl std::fmt::Display for TypeGeneric {
+impl<'a> From<QualifiedType<'a>> for GenericImpl<'a> {
+    fn from(ty: QualifiedType<'a>) -> Self {
+        Self::Type(ty)
+    }
+}
+
+impl<'a> From<GenericWildcardBoundary<'a>> for GenericImpl<'a> {
+    fn from(wildcard: GenericWildcardBoundary<'a>) -> Self {
+        Self::Wildcard(wildcard)
+    }
+}
+
+impl<'a> std::fmt::Display for GenericImpl<'a> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            TypeGeneric::Type(items) => write!(
+            GenericImpl::Type(items) => write!(
                 f,
                 "{}",
                 items
@@ -221,84 +176,203 @@ impl std::fmt::Display for TypeGeneric {
                     .collect::<Vec<_>>()
                     .join(".")
             ),
-            TypeGeneric::Wildcard(wildcard_boundary) => wildcard_boundary.fmt(f),
+            GenericImpl::Wildcard(wildcard_boundary) => wildcard_boundary.fmt(f),
         }
     }
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct Type {
-    pub name: TypeName,
-    pub generics: Box<[TypeGeneric]>,
-    pub array_depth: usize,
+pub enum Type<'a> {
+    Void,
+    Boolean,
+    Byte,
+    Char,
+    Short,
+    Integer,
+    Long,
+    Float,
+    Double,
+    Named {
+        name: &'a str,
+        generic_impls: Box<[GenericImpl<'a>]>,
+    },
+    Array(Box<Type<'a>>),
 }
 
-impl std::fmt::Display for Type {
+impl<'a> Type<'a> {
+    pub fn wrap_by_array(&mut self, depth: usize) {
+        for _ in 0..depth {
+            let inner = std::mem::replace(self, Self::Void);
+            *self = Self::Array(Box::new(inner));
+        }
+    }
+}
+
+pub(crate) struct QualifiedTypeBuilder<'a> {
+    ty: QualifiedType<'a>,
+}
+
+impl<'a> QualifiedTypeBuilder<'a> {
+    pub(crate) fn new(ty: impl Into<QualifiedType<'a>>) -> Self {
+        Self { ty: ty.into() }
+    }
+
+    pub(crate) fn with_array_depth(mut self, depth: usize) -> Self {
+        if depth > 0 {
+            self.ty
+                .last_mut()
+                .expect("qualified type must contain at least one type")
+                .wrap_by_array(depth);
+        }
+
+        self
+    }
+
+    pub(crate) fn build(self) -> QualifiedType<'a> {
+        self.ty
+    }
+}
+
+impl<'a> std::fmt::Display for Type<'a> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        if self.generics.is_empty() {
-            write!(f, "{}{}", self.name, "[]".repeat(self.array_depth))
-        } else {
-            write!(
-                f,
-                "{}<{}>{}",
-                self.name,
-                self.generics
-                    .iter()
-                    .map(|part| part.to_string())
-                    .collect::<Vec<_>>()
-                    .join(", "),
-                "[]".repeat(self.array_depth)
-            )
+        match self {
+            Self::Void => write!(f, "void"),
+            Self::Boolean => write!(f, "boolean"),
+            Self::Byte => write!(f, "byte"),
+            Self::Char => write!(f, "char"),
+            Self::Short => write!(f, "short"),
+            Self::Integer => write!(f, "integer"),
+            Self::Long => write!(f, "long"),
+            Self::Float => write!(f, "float"),
+            Self::Double => write!(f, "double"),
+            Self::Named {
+                name,
+                generic_impls,
+            } => {
+                if generic_impls.is_empty() {
+                    write!(f, "{name}")
+                } else {
+                    write!(
+                        f,
+                        "{name}<{}>",
+                        generic_impls
+                            .iter()
+                            .map(|part| part.to_string())
+                            .collect::<Vec<_>>()
+                            .join(", "),
+                    )
+                }
+            }
+            Self::Array(inner_type) => write!(f, "{inner_type}[]"),
         }
     }
 }
 
-pub type QualifiedType = Box<[Type]>;
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct Variable {
-    pub modifiers: Modifiers,
-    pub r#type: QualifiedType,
-    pub ident: String,
-    // TODO: may be initialisers?
+pub(crate) struct TypeBuilder<'a, const NAMED: bool> {
+    ty: Type<'a>,
 }
 
-impl Variable {
-    pub fn new_array(
-        modifiers: Modifiers,
-        r#type: QualifiedType,
-        idents: Box<[(Cow<'_, str>, usize)]>,
-    ) -> Box<[Self]> {
-        idents
-            .into_iter()
-            .map(|(ident, array_depth)| Self {
-                modifiers: modifiers.clone(),
-                r#type: {
-                    let mut clone = r#type.clone();
-                    clone.last_mut().unwrap().array_depth += array_depth;
-                    clone
-                },
-                ident: ident.to_string(),
-            })
-            .collect()
+impl<'a, const NAMED: bool> TypeBuilder<'a, NAMED> {
+    pub(crate) fn wrap_by_array(mut self, depth: usize) -> Self {
+        for _ in 0..depth {
+            self.ty = Type::Array(Box::new(self.ty));
+        }
+
+        self
+    }
+
+    pub(crate) fn build(self) -> Type<'a> {
+        self.ty
+    }
+}
+
+impl<'a> TypeBuilder<'a, false> {
+    pub(crate) fn any(ty: Type<'a>) -> TypeBuilder<'a, false> {
+        TypeBuilder { ty }
+    }
+}
+
+impl<'a> TypeBuilder<'a, true> {
+    pub(crate) fn named(name: &'a str) -> TypeBuilder<'a, true> {
+        TypeBuilder {
+            ty: Type::Named {
+                name,
+                generic_impls: Box::new([]),
+            },
+        }
+    }
+
+    pub(crate) fn with_generic_impls(mut self, generic_impls: Box<[GenericImpl<'a>]>) -> Self {
+        match self.ty {
+            Type::Named { name, .. } => {
+                self.ty = Type::Named {
+                    name,
+                    generic_impls,
+                }
+            }
+            _ => unreachable!(),
+        }
+
+        self
     }
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct GenericDefinition {
-    pub ident: String,
-    pub extends: Box<[QualifiedType]>,
+pub struct Field<'a> {
+    pub modifiers: Modifiers,
+    pub r#type: QualifiedType<'a>,
+    pub name: &'a str,
 }
 
-impl std::fmt::Display for GenericDefinition {
+pub(crate) struct FieldBuilder<'a> {
+    modifiers: Modifiers,
+    r#type: QualifiedType<'a>,
+    name: &'a str,
+}
+
+impl<'a> FieldBuilder<'a> {
+    pub(crate) fn single(name: &'a str) -> Self {
+        Self {
+            modifiers: Modifiers::empty(),
+            r#type: QualifiedType::empty(),
+            name,
+        }
+    }
+
+    pub(crate) fn build(self) -> Field<'a> {
+        Field {
+            modifiers: self.modifiers,
+            r#type: self.r#type,
+            name: self.name,
+        }
+    }
+
+    pub(crate) fn with_modifiers(mut self, modifiers: Modifiers) -> Self {
+        self.modifiers.insert(modifiers);
+        self
+    }
+
+    pub(crate) fn with_type(mut self, ty: QualifiedType<'a>) -> Self {
+        self.r#type = ty;
+        self
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct GenericDecl<'a> {
+    pub name: &'a str,
+    pub extends: Box<[QualifiedType<'a>]>,
+}
+
+impl<'a> std::fmt::Display for GenericDecl<'a> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         if self.extends.is_empty() {
-            write!(f, "{}", self.ident)
+            write!(f, "{}", self.name)
         } else {
             write!(
                 f,
                 "{} extends {}",
-                self.ident,
+                self.name,
                 self.extends
                     .iter()
                     .map(|extend| extend
@@ -313,478 +387,628 @@ impl std::fmt::Display for GenericDefinition {
     }
 }
 
+pub(crate) struct GenericDeclBuilder<'a> {
+    name: &'a str,
+    extends: Vec<QualifiedType<'a>>,
+}
+
+impl<'a> GenericDeclBuilder<'a> {
+    pub(crate) fn new(name: &'a str) -> Self {
+        Self {
+            name,
+            extends: Vec::new(),
+        }
+    }
+
+    pub(crate) fn with_extends(
+        mut self,
+        extends: impl IntoIterator<Item = QualifiedType<'a>>,
+    ) -> Self {
+        self.extends.extend(extends);
+        self
+    }
+
+    pub(crate) fn build(self) -> GenericDecl<'a> {
+        GenericDecl {
+            name: self.name,
+            extends: self.extends.into_boxed_slice(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
-pub struct FunctionArgument {
+pub struct FunctionArgument<'a> {
     pub modifiers: Modifiers,
-    pub r#type: QualifiedType,
-    pub ident: String,
+    pub r#type: QualifiedType<'a>,
+    pub name: &'a str,
     pub vararg: bool,
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub struct Function {
-    pub modifiers: Modifiers,
-    pub generics: Box<[GenericDefinition]>,
-    pub return_type: QualifiedType,
-    pub ident: String,
-    pub arguments: Box<[FunctionArgument]>,
-    // TODO: may be initialisers?
+pub(crate) struct FunctionArgumentBuilder<'a> {
+    modifiers: Modifiers,
+    r#type: QualifiedType<'a>,
+    name: &'a str,
+    vararg: bool,
 }
 
-#[derive(Debug, Clone)]
-pub(super) enum ClassEntry {
-    Variables(Box<[Variable]>),
-    Function(Function),
-    Class(Class),
-    Enum(Enum),
-    Interface(Interface),
-    Skip,
-}
+impl<'a> FunctionArgumentBuilder<'a> {
+    pub(crate) fn new(name: &'a str) -> Self {
+        Self {
+            modifiers: Modifiers::empty(),
+            r#type: QualifiedType::empty(),
+            name,
+            vararg: false,
+        }
+    }
 
-#[derive(Debug, Clone)]
-pub struct Class {
-    pub modifiers: Modifiers,
-    pub ident: String,
-    pub generics: Box<[GenericDefinition]>,
+    pub(crate) fn with_modifiers(mut self, modifiers: Modifiers) -> Self {
+        self.modifiers.insert(modifiers);
+        self
+    }
 
-    pub extends: Option<QualifiedType>,
-    pub implements: Box<[QualifiedType]>,
-    pub permits: Box<[QualifiedType]>,
+    pub(crate) fn with_type(mut self, ty: QualifiedType<'a>) -> Self {
+        self.r#type = ty;
+        self
+    }
 
-    pub variables: Box<[Variable]>,
-    pub functions: Box<[Function]>,
+    pub(crate) fn with_vararg(mut self) -> Self {
+        self.vararg = true;
+        self
+    }
 
-    pub classes: Box<[ClassCell]>,
-    pub enums: Box<[EnumCell]>,
-    pub interfaces: Box<[InterfaceCell]>,
-}
-
-impl GetIdent for Class {
-    fn ident(&self) -> &str {
-        self.ident.as_str()
+    pub(crate) fn build(self) -> FunctionArgument<'a> {
+        FunctionArgument {
+            modifiers: self.modifiers,
+            r#type: self.r#type,
+            name: self.name,
+            vararg: self.vararg,
+        }
     }
 }
 
-pub type ClassCell = ObjectCell<Class>;
+#[derive(Debug, Clone, PartialEq)]
+pub struct Function<'a> {
+    pub modifiers: Modifiers,
+    pub generic_decls: Box<[GenericDecl<'a>]>,
+    pub return_type: QualifiedType<'a>,
+    pub name: &'a str,
+    pub args: Box<[FunctionArgument<'a>]>,
+}
 
-// impl std::fmt::Debug for Class {
-//     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-//         f.write_fmt(format_args!("Class@{}", &self.ident))
-//     }
-// }
+pub(crate) struct FunctionBuilder<'a> {
+    modifiers: Modifiers,
+    generic_decls: Vec<GenericDecl<'a>>,
+    return_type: QualifiedType<'a>,
+    name: &'a str,
+    args: Vec<FunctionArgument<'a>>,
+}
 
-impl
-    From<(
-        Modifiers,
-        Cow<'_, str>,
-        Option<Box<[GenericDefinition]>>,
-        Option<Box<[FunctionArgument]>>,
-        Option<Box<[QualifiedType]>>,
-        Option<Box<[ClassEntry]>>,
-    )> for Class
-{
-    fn from(
-        value: (
-            Modifiers,
-            Cow<'_, str>,
-            Option<Box<[GenericDefinition]>>,
-            Option<Box<[FunctionArgument]>>,
-            Option<Box<[QualifiedType]>>,
-            Option<Box<[ClassEntry]>>,
-        ),
+impl<'a> FunctionBuilder<'a> {
+    pub(crate) fn new(name: &'a str) -> Self {
+        Self {
+            modifiers: Modifiers::empty(),
+            generic_decls: Vec::new(),
+            return_type: QualifiedType::empty(),
+            name,
+            args: Vec::new(),
+        }
+    }
+
+    pub(crate) fn with_modifiers(mut self, modifiers: Modifiers) -> Self {
+        self.modifiers.insert(modifiers);
+        self
+    }
+
+    pub(crate) fn with_generic_decls(
+        mut self,
+        generic_decls: impl IntoIterator<Item = GenericDecl<'a>>,
     ) -> Self {
-        let (mut modifiers, ident, generics, args, implements, entries) = value;
+        self.generic_decls.extend(generic_decls);
+        self
+    }
 
-        modifiers.insert(Modifiers::FINAL);
+    pub(crate) fn with_return_type(mut self, ty: QualifiedType<'a>) -> Self {
+        self.return_type = ty;
+        self
+    }
 
-        let mut variables = Vec::new();
-        let mut functions = Vec::new();
-        let mut classes = Vec::new();
-        let mut enums = Vec::new();
-        let mut interfaces = Vec::new();
+    pub(crate) fn with_args(
+        mut self,
+        args: impl IntoIterator<Item = FunctionArgument<'a>>,
+    ) -> Self {
+        self.args.extend(args);
+        self
+    }
 
-        if let Some(entries) = entries {
-            for entry in entries {
-                match entry {
-                    ClassEntry::Variables(v) => variables.append(&mut v.into_vec()),
-                    ClassEntry::Function(f) => functions.push(f),
-                    ClassEntry::Class(c) => classes.push(c),
-                    ClassEntry::Enum(e) => enums.push(e),
-                    ClassEntry::Interface(i) => interfaces.push(i),
-                    ClassEntry::Skip => {}
-                }
-            }
+    pub(crate) fn build(self) -> Function<'a> {
+        Function {
+            modifiers: self.modifiers,
+            generic_decls: self.generic_decls.into_boxed_slice(),
+            return_type: self.return_type,
+            name: self.name,
+            args: self.args.into_boxed_slice(),
         }
+    }
+}
 
-        functions.push(Function {
-            modifiers: Modifiers::PUBLIC | Modifiers::STATIC,
-            generics: Box::new([]),
-            return_type: QualifiedType::from([Type {
-                name: TypeName::Ident(ident.to_string()),
-                generics: generics
-                    .clone()
-                    .unwrap_or_else(|| Box::new([]))
-                    .into_iter()
-                    .map(|x| {
-                        TypeGeneric::Type(QualifiedType::from([Type {
-                            name: TypeName::Ident(x.ident),
-                            generics: Box::new([]),
-                            array_depth: 0,
-                        }]))
-                    })
-                    .collect::<Box<[_]>>(),
-                array_depth: 0,
-            }]),
-            ident: "__ctor".to_string(),
-            arguments: args.clone().unwrap_or_else(|| Box::new([])),
-        });
+#[derive(Debug, Clone)]
+pub(super) enum ClassEntry<'a> {
+    Fields(Box<[Field<'a>]>),
+    Function(Function<'a>),
+    Class(Class<'a>),
+    Enum(Enum<'a>),
+    Interface(Interface<'a>),
+    Skip,
+}
 
-        if let Some(args) = args {
-            for mut arg in args {
-                arg.modifiers.insert(Modifiers::PRIVATE | Modifiers::FINAL);
+#[derive(Debug, Clone, PartialEq)]
+pub struct Class<'a> {
+    pub modifiers: Modifiers,
+    pub name: &'a str,
+    pub generic_decls: Box<[GenericDecl<'a>]>,
 
-                if arg.vararg {
-                    arg.r#type.last_mut().unwrap().array_depth += 1;
-                }
+    pub extend: Option<QualifiedType<'a>>,
+    pub implements: Box<[QualifiedType<'a>]>,
+    pub permits: Box<[QualifiedType<'a>]>,
 
-                functions.push(Function {
-                    modifiers: Modifiers::PUBLIC,
-                    generics: Box::new([]),
-                    return_type: arg.r#type.clone(),
-                    ident: arg.ident.clone(),
-                    arguments: Box::new([]),
-                });
+    pub fields: Box<[Field<'a>]>,
+    pub functions: Box<[Function<'a>]>,
 
-                variables.push(Variable {
-                    modifiers: arg.modifiers,
-                    r#type: arg.r#type,
-                    ident: arg.ident,
-                });
-            }
-        }
+    pub classes: Box<[Class<'a>]>,
+    pub enums: Box<[Enum<'a>]>,
+    pub interfaces: Box<[Interface<'a>]>,
+}
+
+pub(crate) struct ClassBuilder<'a, const RECORD: bool> {
+    modifiers: Modifiers,
+    name: &'a str,
+    generic_decls: Vec<GenericDecl<'a>>,
+
+    extend: Option<QualifiedType<'a>>,
+    implements: Vec<QualifiedType<'a>>,
+    permits: Vec<QualifiedType<'a>>,
+
+    fields: Vec<Field<'a>>,
+    functions: Vec<Function<'a>>,
+
+    classes: Vec<Class<'a>>,
+    enums: Vec<Enum<'a>>,
+    interfaces: Vec<Interface<'a>>,
+}
+
+impl<'a> ClassBuilder<'a, true> {
+    pub(crate) fn record(name: &'a str, fields: impl IntoIterator<Item = Field<'a>>) -> Self {
+        let fields = fields.into_iter().collect::<Vec<_>>();
+
+        let functions = fields
+            .iter()
+            .map(|field| {
+                FunctionBuilder::new(field.name)
+                    .with_modifiers(Modifiers::PUBLIC)
+                    .with_return_type(field.r#type.clone())
+                    .build()
+            })
+            .collect::<Vec<_>>();
 
         Self {
-            modifiers,
-            ident: ident.to_string(),
-            generics: generics.unwrap_or(Box::new([])),
-            extends: Some(Box::new([
-                Type {
-                    name: TypeName::Ident("java".to_string()),
-                    generics: Box::new([]),
-                    array_depth: 0,
-                },
-                Type {
-                    name: TypeName::Ident("lang".to_string()),
-                    generics: Box::new([]),
-                    array_depth: 0,
-                },
-                Type {
-                    name: TypeName::Ident("Record".to_string()),
-                    generics: Box::new([]),
-                    array_depth: 0,
-                },
+            modifiers: Modifiers::empty(),
+            name,
+            generic_decls: Vec::new(),
+            extend: Some(QualifiedType::from([
+                TypeBuilder::named("java").build(),
+                TypeBuilder::named("lang").build(),
+                TypeBuilder::named("Record").build(),
             ])),
-            implements: implements.unwrap_or(Box::from([])),
-            permits: Box::from([]),
-            variables: variables.into_boxed_slice(),
-            functions: functions.into_boxed_slice(),
-            classes: classes.into_iter().map(ClassCell::from).collect(),
-            enums: enums.into_iter().map(EnumCell::from).collect(),
-            interfaces: interfaces.into_iter().map(InterfaceCell::from).collect(),
+            implements: Vec::new(),
+            permits: Vec::new(),
+            fields,
+            functions,
+            classes: Vec::new(),
+            enums: Vec::new(),
+            interfaces: Vec::new(),
         }
     }
 }
 
-impl
-    From<(
-        Modifiers,
-        Cow<'_, str>,
-        Option<Box<[GenericDefinition]>>,
-        Option<QualifiedType>,
-        Option<Box<[QualifiedType]>>,
-        Option<Box<[QualifiedType]>>,
-        Option<Box<[ClassEntry]>>,
-    )> for Class
-{
-    fn from(
-        value: (
-            Modifiers,
-            Cow<'_, str>,
-            Option<Box<[GenericDefinition]>>,
-            Option<QualifiedType>,
-            Option<Box<[QualifiedType]>>,
-            Option<Box<[QualifiedType]>>,
-            Option<Box<[ClassEntry]>>,
-        ),
+impl<'a> ClassBuilder<'a, false> {
+    pub(crate) fn class(name: &'a str) -> Self {
+        Self {
+            modifiers: Modifiers::empty(),
+            name,
+            generic_decls: Vec::new(),
+            extend: None,
+            implements: Vec::new(),
+            permits: Vec::new(),
+            fields: Vec::new(),
+            functions: Vec::new(),
+            classes: Vec::new(),
+            enums: Vec::new(),
+            interfaces: Vec::new(),
+        }
+    }
+
+    pub(crate) fn with_extend(mut self, extend: QualifiedType<'a>) -> Self {
+        let _ = self.extend.insert(extend);
+        self
+    }
+
+    pub(crate) fn with_permits(
+        mut self,
+        permits: impl IntoIterator<Item = QualifiedType<'a>>,
     ) -> Self {
-        let (modifiers, ident, generics, extends, implements, permits, entries) = value;
+        self.permits.extend(permits);
+        self
+    }
+}
 
-        let mut variables = Vec::new();
-        let mut functions = Vec::new();
-        let mut classes = Vec::new();
-        let mut enums = Vec::new();
-        let mut interfaces = Vec::new();
+impl<'a, const RECORD: bool> ClassBuilder<'a, RECORD> {
+    pub(crate) fn with_modifiers(mut self, modifiers: Modifiers) -> Self {
+        self.modifiers.insert(modifiers);
+        self
+    }
 
-        if let Some(entries) = entries {
-            for entry in entries {
-                match entry {
-                    ClassEntry::Variables(v) => variables.append(&mut v.into_vec()),
-                    ClassEntry::Function(f) => functions.push(f),
-                    ClassEntry::Class(c) => classes.push(c),
-                    ClassEntry::Enum(e) => enums.push(e),
-                    ClassEntry::Interface(i) => interfaces.push(i),
-                    ClassEntry::Skip => {}
-                }
+    pub(crate) fn with_generic_decls(
+        mut self,
+        generic_decls: impl IntoIterator<Item = GenericDecl<'a>>,
+    ) -> Self {
+        self.generic_decls.extend(generic_decls);
+        self
+    }
+
+    pub(crate) fn with_implements(
+        mut self,
+        implements: impl IntoIterator<Item = QualifiedType<'a>>,
+    ) -> Self {
+        self.implements.extend(implements);
+        self
+    }
+
+    pub(crate) fn with_entries(
+        mut self,
+        entries: impl IntoIterator<Item = ClassEntry<'a>>,
+    ) -> Self {
+        for entry in entries {
+            match entry {
+                ClassEntry::Fields(v) => self.fields.extend(v),
+                ClassEntry::Function(f) => self.functions.push(f),
+                ClassEntry::Class(c) => self.classes.push(c),
+                ClassEntry::Enum(e) => self.enums.push(e),
+                ClassEntry::Interface(i) => self.interfaces.push(i),
+                ClassEntry::Skip => continue,
             }
         }
 
-        Self {
-            modifiers,
-            ident: ident.to_string(),
-            generics: generics.unwrap_or(Box::new([])),
-            extends,
-            implements: implements.unwrap_or(Box::from([])),
-            permits: permits.unwrap_or(Box::from([])),
-            variables: variables.into_boxed_slice(),
-            functions: functions.into_boxed_slice(),
-            classes: classes.into_iter().map(ClassCell::from).collect(),
-            enums: enums.into_iter().map(EnumCell::from).collect(),
-            interfaces: interfaces.into_iter().map(InterfaceCell::from).collect(),
+        self
+    }
+
+    pub(crate) fn build(self) -> Class<'a> {
+        Class {
+            modifiers: self.modifiers,
+            name: self.name,
+            generic_decls: self.generic_decls.into_boxed_slice(),
+            extend: self.extend,
+            implements: self.implements.into_boxed_slice(),
+            permits: self.permits.into_boxed_slice(),
+            fields: self.fields.into_boxed_slice(),
+            functions: self.functions.into_boxed_slice(),
+            classes: self.classes.into_boxed_slice(),
+            enums: self.enums.into_boxed_slice(),
+            interfaces: self.interfaces.into_boxed_slice(),
         }
     }
 }
 
-#[derive(Debug, Clone)]
-pub(super) enum EnumEntry {
-    Variables(Box<[Variable]>),
-    Function(Function),
-    Class(Class),
-    Enum(Enum),
-    Interface(Interface),
-    Skip,
-}
-
-#[derive(Debug, Clone)]
-pub struct Enum {
-    pub modifiers: Modifiers,
-    pub ident: String,
-    pub generics: Box<[GenericDefinition]>,
-
-    pub implements: Box<[QualifiedType]>,
-
-    pub variables: Box<[Variable]>,
-    pub functions: Box<[Function]>,
-
-    pub classes: Box<[ClassCell]>,
-    pub enums: Box<[EnumCell]>,
-    pub interfaces: Box<[InterfaceCell]>,
-}
-
-impl GetIdent for Enum {
+impl<'a> GetIdent for Class<'a> {
     fn ident(&self) -> &str {
-        self.ident.as_str()
-    }
-}
-
-pub type EnumCell = ObjectCell<Enum>;
-
-// impl std::fmt::Debug for Enum {
-//     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-//         f.write_fmt(format_args!("Enum@{}", &self.ident))
-//     }
-// }
-
-impl
-    From<(
-        Modifiers,
-        Cow<'_, str>,
-        Option<Box<[GenericDefinition]>>,
-        Option<Box<[QualifiedType]>>,
-        Option<Box<[EnumEntry]>>,
-    )> for Enum
-{
-    fn from(
-        value: (
-            Modifiers,
-            Cow<'_, str>,
-            Option<Box<[GenericDefinition]>>,
-            Option<Box<[QualifiedType]>>,
-            Option<Box<[EnumEntry]>>,
-        ),
-    ) -> Self {
-        let (modifiers, ident, generics, implements, entries) = value;
-
-        let mut variables = Vec::new();
-        let mut functions = Vec::new();
-        let mut classes = Vec::new();
-        let mut enums = Vec::new();
-        let mut interfaces = Vec::new();
-
-        if let Some(entries) = entries {
-            for entry in entries {
-                match entry {
-                    EnumEntry::Variables(v) => variables.append(&mut v.into_vec()),
-                    EnumEntry::Function(f) => functions.push(f),
-                    EnumEntry::Class(c) => classes.push(c),
-                    EnumEntry::Enum(e) => enums.push(e),
-                    EnumEntry::Interface(i) => interfaces.push(i),
-                    EnumEntry::Skip => {}
-                }
-            }
-        }
-
-        Self {
-            modifiers,
-            ident: ident.to_string(),
-            generics: generics.unwrap_or(Box::new([])),
-            implements: implements.unwrap_or(Box::from([])),
-            classes: classes.into_iter().map(ClassCell::from).collect(),
-            enums: enums.into_iter().map(EnumCell::from).collect(),
-            interfaces: interfaces.into_iter().map(InterfaceCell::from).collect(),
-            variables: variables.into_boxed_slice(),
-            functions: functions.into_boxed_slice(),
-        }
+        self.name
     }
 }
 
 #[derive(Debug, Clone)]
-pub(super) enum InterfaceEntry {
-    Variables(Box<[Variable]>),
-    Function(Function),
-    Class(Class),
-    Enum(Enum),
-    Interface(Interface),
+pub(super) enum EnumEntry<'a> {
+    Fields(Box<[Field<'a>]>),
+    Function(Function<'a>),
+    Class(Class<'a>),
+    Enum(Enum<'a>),
+    Interface(Interface<'a>),
     Skip,
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct Interface {
+pub struct Enum<'a> {
     pub modifiers: Modifiers,
-    pub ident: String,
-    pub generics: Box<[GenericDefinition]>,
+    pub name: &'a str,
+    pub generic_decls: Box<[GenericDecl<'a>]>,
 
-    pub extends: Box<[QualifiedType]>,
-    pub permits: Box<[QualifiedType]>,
+    pub implements: Box<[QualifiedType<'a>]>,
 
-    pub variables: Box<[Variable]>,
-    pub functions: Box<[Function]>,
+    pub fields: Box<[Field<'a>]>,
+    pub functions: Box<[Function<'a>]>,
 
-    pub classes: Box<[ClassCell]>,
-    pub enums: Box<[EnumCell]>,
-    pub interfaces: Box<[InterfaceCell]>,
+    pub classes: Box<[Class<'a>]>,
+    pub enums: Box<[Enum<'a>]>,
+    pub interfaces: Box<[Interface<'a>]>,
 }
 
-impl GetIdent for Interface {
+impl<'a> GetIdent for Enum<'a> {
     fn ident(&self) -> &str {
-        self.ident.as_str()
+        self.name
     }
 }
 
-pub type InterfaceCell = ObjectCell<Interface>;
+pub(crate) struct EnumBuilder<'a> {
+    modifiers: Modifiers,
+    name: &'a str,
+    generic_decls: Vec<GenericDecl<'a>>,
 
-impl
-    From<(
-        Modifiers,
-        Cow<'_, str>,
-        Option<Box<[GenericDefinition]>>,
-        Option<Box<[QualifiedType]>>,
-        Option<Box<[QualifiedType]>>,
-        Option<Box<[InterfaceEntry]>>,
-    )> for Interface
-{
-    fn from(
-        value: (
-            Modifiers,
-            Cow<'_, str>,
-            Option<Box<[GenericDefinition]>>,
-            Option<Box<[QualifiedType]>>,
-            Option<Box<[QualifiedType]>>,
-            Option<Box<[InterfaceEntry]>>,
-        ),
+    implements: Vec<QualifiedType<'a>>,
+
+    fields: Vec<Field<'a>>,
+    functions: Vec<Function<'a>>,
+
+    classes: Vec<Class<'a>>,
+    enums: Vec<Enum<'a>>,
+    interfaces: Vec<Interface<'a>>,
+}
+
+impl<'a> EnumBuilder<'a> {
+    pub(crate) fn new(name: &'a str) -> Self {
+        Self {
+            modifiers: Modifiers::empty(),
+            name,
+            generic_decls: Vec::new(),
+            implements: Vec::new(),
+            fields: Vec::new(),
+            functions: Vec::new(),
+            classes: Vec::new(),
+            enums: Vec::new(),
+            interfaces: Vec::new(),
+        }
+    }
+
+    pub(crate) fn with_modifiers(mut self, modifiers: Modifiers) -> Self {
+        self.modifiers.insert(modifiers);
+        self
+    }
+
+    pub(crate) fn with_generic_decls(
+        mut self,
+        generic_decls: impl IntoIterator<Item = GenericDecl<'a>>,
     ) -> Self {
-        let (modifiers, ident, generics, extends, permits, entries) = value;
+        self.generic_decls.extend(generic_decls);
+        self
+    }
 
-        let mut variables = Vec::new();
-        let mut functions = Vec::new();
-        let mut classes = Vec::new();
-        let mut enums = Vec::new();
-        let mut interfaces = Vec::new();
+    pub(crate) fn with_implements(
+        mut self,
+        extends: impl IntoIterator<Item = QualifiedType<'a>>,
+    ) -> Self {
+        self.implements.extend(extends);
+        self
+    }
 
-        if let Some(entries) = entries {
-            for entry in entries {
-                match entry {
-                    InterfaceEntry::Variables(v) => variables.extend_from_slice(&v),
-                    InterfaceEntry::Function(f) => functions.push(f),
-                    InterfaceEntry::Class(c) => classes.push(c),
-                    InterfaceEntry::Enum(e) => enums.push(e),
-                    InterfaceEntry::Interface(i) => interfaces.push(i),
-                    InterfaceEntry::Skip => {}
-                }
+    pub(crate) fn with_entries(mut self, entries: impl IntoIterator<Item = EnumEntry<'a>>) -> Self {
+        for entry in entries {
+            match entry {
+                EnumEntry::Fields(v) => self.fields.extend(v),
+                EnumEntry::Function(f) => self.functions.push(f),
+                EnumEntry::Class(c) => self.classes.push(c),
+                EnumEntry::Enum(e) => self.enums.push(e),
+                EnumEntry::Interface(i) => self.interfaces.push(i),
+                EnumEntry::Skip => continue,
             }
         }
 
-        Self {
-            modifiers,
-            ident: ident.to_string(),
-            extends: extends.unwrap_or(Box::new([])),
-            permits: permits.unwrap_or(Box::new([])),
-            variables: variables.into_boxed_slice(),
-            generics: generics.unwrap_or(Box::new([])),
-            functions: functions.into_boxed_slice(),
-            classes: classes.into_iter().map(ClassCell::from).collect(),
-            enums: enums.into_iter().map(EnumCell::from).collect(),
-            interfaces: interfaces.into_iter().map(InterfaceCell::from).collect(),
+        self
+    }
+
+    pub(crate) fn build(self) -> Enum<'a> {
+        Enum {
+            modifiers: self.modifiers,
+            name: self.name,
+            generic_decls: self.generic_decls.into_boxed_slice(),
+            implements: self.implements.into_boxed_slice(),
+            fields: self.fields.into_boxed_slice(),
+            functions: self.functions.into_boxed_slice(),
+            classes: self.classes.into_boxed_slice(),
+            enums: self.enums.into_boxed_slice(),
+            interfaces: self.interfaces.into_boxed_slice(),
         }
     }
 }
 
 #[derive(Debug, Clone)]
-pub(super) enum RootEntry {
-    Class(Class),
-    Enum(Enum),
-    Interface(Interface),
+pub(super) enum InterfaceEntry<'a> {
+    Fields(Box<[Field<'a>]>),
+    Function(Function<'a>),
+    Class(Class<'a>),
+    Enum(Enum<'a>),
+    Interface(Interface<'a>),
+    Skip,
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct Root {
-    pub package: String,
-    pub imports: Box<[String]>,
-    pub classes: Box<[ClassCell]>,
-    pub enums: Box<[EnumCell]>,
-    pub interfaces: Box<[InterfaceCell]>,
+pub struct Interface<'a> {
+    pub modifiers: Modifiers,
+    pub name: &'a str,
+    pub generic_decls: Box<[GenericDecl<'a>]>,
+
+    pub extends: Box<[QualifiedType<'a>]>,
+    pub permits: Box<[QualifiedType<'a>]>,
+
+    pub fields: Box<[Field<'a>]>,
+    pub functions: Box<[Function<'a>]>,
+
+    pub classes: Box<[Class<'a>]>,
+    pub enums: Box<[Enum<'a>]>,
+    pub interfaces: Box<[Interface<'a>]>,
 }
 
-impl From<(Cow<'_, str>, Vec<Cow<'_, str>>, Option<Box<[RootEntry]>>)> for Root {
-    fn from(value: (Cow<'_, str>, Vec<Cow<'_, str>>, Option<Box<[RootEntry]>>)) -> Self {
-        let (package, mut imports, entries) = value;
+impl<'a> GetIdent for Interface<'a> {
+    fn ident(&self) -> &str {
+        self.name
+    }
+}
 
-        let mut classes = Vec::new();
-        let mut enums = Vec::new();
-        let mut interfaces = Vec::new();
+pub(crate) struct InterfaceBuilder<'a> {
+    modifiers: Modifiers,
+    name: &'a str,
+    generic_decls: Vec<GenericDecl<'a>>,
 
-        if let Some(entries) = entries {
-            for entry in entries {
-                match entry {
-                    RootEntry::Class(c) => classes.push(c),
-                    RootEntry::Enum(e) => enums.push(e),
-                    RootEntry::Interface(i) => interfaces.push(i),
-                }
+    extends: Vec<QualifiedType<'a>>,
+    permits: Vec<QualifiedType<'a>>,
+
+    fields: Vec<Field<'a>>,
+    functions: Vec<Function<'a>>,
+
+    classes: Vec<Class<'a>>,
+    enums: Vec<Enum<'a>>,
+    interfaces: Vec<Interface<'a>>,
+}
+
+impl<'a> InterfaceBuilder<'a> {
+    pub(crate) fn new(name: &'a str) -> Self {
+        Self {
+            modifiers: Modifiers::empty(),
+            name,
+            generic_decls: Vec::new(),
+            extends: Vec::new(),
+            permits: Vec::new(),
+            fields: Vec::new(),
+            functions: Vec::new(),
+            classes: Vec::new(),
+            enums: Vec::new(),
+            interfaces: Vec::new(),
+        }
+    }
+
+    pub(crate) fn with_modifiers(mut self, modifiers: Modifiers) -> Self {
+        self.modifiers.insert(modifiers);
+        self
+    }
+
+    pub(crate) fn with_generic_decls(
+        mut self,
+        generic_decls: impl IntoIterator<Item = GenericDecl<'a>>,
+    ) -> Self {
+        self.generic_decls.extend(generic_decls);
+        self
+    }
+
+    pub(crate) fn with_extends(
+        mut self,
+        extends: impl IntoIterator<Item = QualifiedType<'a>>,
+    ) -> Self {
+        self.extends.extend(extends);
+        self
+    }
+
+    pub(crate) fn with_permits(
+        mut self,
+        permits: impl IntoIterator<Item = QualifiedType<'a>>,
+    ) -> Self {
+        self.permits.extend(permits);
+        self
+    }
+
+    pub(crate) fn with_entries(
+        mut self,
+        entries: impl IntoIterator<Item = InterfaceEntry<'a>>,
+    ) -> Self {
+        for entry in entries {
+            match entry {
+                InterfaceEntry::Fields(v) => self.fields.extend(v),
+                InterfaceEntry::Function(f) => self.functions.push(f),
+                InterfaceEntry::Class(c) => self.classes.push(c),
+                InterfaceEntry::Enum(e) => self.enums.push(e),
+                InterfaceEntry::Interface(i) => self.interfaces.push(i),
+                InterfaceEntry::Skip => continue,
             }
         }
 
-        imports.push(Cow::from("java.lang.*"));
+        self
+    }
 
-        Self {
-            package: package.to_string(),
-            imports: imports.into_iter().map(String::from).collect(),
-            classes: classes.into_iter().map(ClassCell::from).collect(),
-            enums: enums.into_iter().map(EnumCell::from).collect(),
-            interfaces: interfaces.into_iter().map(InterfaceCell::from).collect(),
+    pub(crate) fn build(self) -> Interface<'a> {
+        Interface {
+            modifiers: self.modifiers,
+            name: self.name,
+            generic_decls: self.generic_decls.into_boxed_slice(),
+            extends: self.extends.into_boxed_slice(),
+            permits: self.permits.into_boxed_slice(),
+            fields: self.fields.into_boxed_slice(),
+            functions: self.functions.into_boxed_slice(),
+            classes: self.classes.into_boxed_slice(),
+            enums: self.enums.into_boxed_slice(),
+            interfaces: self.interfaces.into_boxed_slice(),
         }
     }
 }
 
-impl std::hash::Hash for Root {
+#[derive(Debug, Clone)]
+pub(super) enum RootEntry<'a> {
+    Class(Class<'a>),
+    Enum(Enum<'a>),
+    Interface(Interface<'a>),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Root<'a> {
+    pub package: &'a str,
+    pub imports: Box<[&'a str]>,
+    pub classes: Box<[Class<'a>]>,
+    pub enums: Box<[Enum<'a>]>,
+    pub interfaces: Box<[Interface<'a>]>,
+}
+
+pub(crate) struct RootBuilder<'a> {
+    package: &'a str,
+    imports: Vec<&'a str>,
+    classes: Vec<Class<'a>>,
+    enums: Vec<Enum<'a>>,
+    interfaces: Vec<Interface<'a>>,
+}
+
+impl<'a> RootBuilder<'a> {
+    pub(crate) fn new(package: &'a str) -> Self {
+        Self {
+            package,
+            imports: Vec::new(),
+            classes: Vec::new(),
+            enums: Vec::new(),
+            interfaces: Vec::new(),
+        }
+    }
+
+    pub(crate) fn with_imports(mut self, imports: impl IntoIterator<Item = &'a str>) -> Self {
+        self.imports.extend(imports);
+        self
+    }
+
+    pub(crate) fn with_entries(mut self, entries: impl IntoIterator<Item = RootEntry<'a>>) -> Self {
+        for entry in entries {
+            match entry {
+                RootEntry::Class(c) => self.classes.push(c),
+                RootEntry::Enum(e) => self.enums.push(e),
+                RootEntry::Interface(i) => self.interfaces.push(i),
+            }
+        }
+
+        self
+    }
+
+    pub(crate) fn build(self) -> Root<'a> {
+        Root {
+            package: self.package,
+            imports: self.imports.into_boxed_slice(),
+            classes: self.classes.into_boxed_slice(),
+            enums: self.enums.into_boxed_slice(),
+            interfaces: self.interfaces.into_boxed_slice(),
+        }
+    }
+}
+
+impl<'a> std::hash::Hash for Root<'a> {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         std::ptr::hash(self, state);
     }

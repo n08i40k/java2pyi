@@ -1,12 +1,11 @@
-//! Tokenization for Java sources.
+//! Tokenization for Java sources used by the public parser.
 //!
 //! # Examples
 //! ```rust
-//! use java_ast_parser::lexer::{Lexer, Token};
+//! let root = java_ast_parser::parse("package com.example;")
+//!     .unwrap_or_else(|_| panic!("valid Java package declaration"));
 //!
-//! let mut lexer = Lexer::new("package com.example;");
-//! let first = lexer.next().unwrap().unwrap();
-//! assert_eq!(first.1, Token::KeywordPackage);
+//! assert_eq!(root.package, "com.example");
 //! ```
 
 use itertools::{Itertools, MultiPeek};

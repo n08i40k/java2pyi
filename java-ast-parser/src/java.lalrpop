@@ -98,39 +98,42 @@ extern {
 }
 
 #[inline]
-UnsafeIdent: Cow<'input, str> = {
-  <Ident> => <>,
-  "module" => Cow::from("module"),
-  "this" => Cow::from("this"),
-  "record" => Cow::from("record"),
-  "sealed" => Cow::from("sealed"),
-  "var" => Cow::from("var"),
-  "exports" => Cow::from("exports"),
-  "requires" => Cow::from("requires"),
-  "permits" => Cow::from("permits"),
+IdentName: &'input str = <l:@L> Ident <r:@R> => &input[l..r];
+
+#[inline]
+UnsafeIdent: &'input str = {
+  <l:@L> Ident <r:@R> => &input[l..r],
+  <l:@L> "module" <r:@R> => &input[l..r],
+  <l:@L> "this" <r:@R> => &input[l..r],
+  <l:@L> "record" <r:@R> => &input[l..r],
+  <l:@L> "sealed" <r:@R> => &input[l..r],
+  <l:@L> "var" <r:@R> => &input[l..r],
+  <l:@L> "exports" <r:@R> => &input[l..r],
+  <l:@L> "requires" <r:@R> => &input[l..r],
+  <l:@L> "permits" <r:@R> => &input[l..r],
 };
 
 #[inline]
-Path: Cow<'input, str> = <l:@L> UnsafeIdent ("." UnsafeIdent)* <r:@R> => Cow::from(&input[l..r]);
+Path: &'input str = <l:@L> UnsafeIdent ("." UnsafeIdent)* <r:@R> => &input[l..r];
 
-CommaList<T>: Box<[T]> = <first:T> <mut rest:("," <T>)*> => { rest.insert(0, first); rest.into_boxed_slice() };
-TrailingCommaList<T>: Box<[T]> = <first:T> <mut rest:("," <T>)*> "," => { rest.insert(0, first); rest.into_boxed_slice() };
+CommaList<T>: Box<[T]> = <mut items:(<T> ",")*> <last:T> => { items.push(last); items.into_boxed_slice() };
+TrailingCommaList<T>: Box<[T]> = <items:(<T> ",")+> => items.into_boxed_slice();
 
-OptionalSemicolonList<T>: Box<[T]> = <first:T> ";"* <mut rest:(<T> ";"*)*> => { rest.insert(0, first); rest.into_boxed_slice() };
+OptionalSemicolonList<T>: Box<[T]> = <items:(<T> ";"*)+> => items.into_boxed_slice();
 
 MayBeTrailingCommaList<T>: Box<[T]> = {
   <CommaList<T>> => <>,
   <TrailingCommaList<T>> => <>,
 };
 
-AmpersandList<T>: Box<[T]> = <first:T> <mut rest:("&" <T>)*> => { rest.insert(0, first); rest.into_boxed_slice() };
-PeriodList<T>: Box<[T]> = <first:T> <mut rest:("." <T>)*> => { rest.insert(0, first); rest.into_boxed_slice() };
+AmpersandList<T>: Box<[T]> = <mut items:(<T> "&")*> <last:T> => { items.push(last); items.into_boxed_slice() };
+PeriodList<T>: Box<[T]> = <mut items:(<T> ".")*> <last:T> => { items.push(last); items.into_boxed_slice() };
 
-Package: Cow<'input, str> = "package" <p:Path> ";"+ => p;
+Package: &'input str = "package" <p:Path> ";"+ => p;
 
 #[inline]
-ImportPath: Cow<'input, str> = <l:@L> UnsafeIdent ("." UnsafeIdent)* ("." "*")? <r:@R> => Cow::from(&input[l..r]);
-Import: Cow<'input, str> = "import" "static"? <p:ImportPath> ";"+ => p;
+ImportPath: &'input str = <l:@L> UnsafeIdent ("." UnsafeIdent)* ("." "*")? <r:@R> => &input[l..r];
+Import: &'input str = "import" "static"? <p:ImportPath> ";"+ => p;
 
 Modifier: ast::Modifiers = {
   "public" => ast::Modifiers::PUBLIC,
@@ -149,88 +152,151 @@ Modifier: ast::Modifiers = {
   "default" => ast::Modifiers::DEFAULT,
 }
 
-Modifiers: ast::Modifiers = <mods:Modifier*> => mods.into_iter().reduce(|a, b| a | b).unwrap_or(ast::Modifiers::empty());
-
-TypeName: ast::TypeName = {
-  "void" => ast::TypeName::Void,
-  "boolean" => ast::TypeName::Boolean,
-  "byte" => ast::TypeName::Byte,
-  "char" => ast::TypeName::Char,
-  "short" => ast::TypeName::Short,
-  "int" => ast::TypeName::Integer,
-  "long" => ast::TypeName::Long,
-  "float" => ast::TypeName::Float,
-  "double" => ast::TypeName::Double,
-  <i:Ident> => ast::TypeName::Ident(i.to_string()),
+Modifiers: ast::Modifiers = {
+  => ast::Modifiers::empty(),
+  <modifier:Modifier> <modifiers:Modifiers> => modifier | modifiers,
 };
 
-TypeGeneric: ast::TypeGeneric = {
-  <t:QualifiedType>               => ast::TypeGeneric::Type(t),
-  "?"                             => ast::TypeGeneric::Wildcard(ast::WildcardBoundary::None),
-  "?" "extends" <t:QualifiedType> => ast::TypeGeneric::Wildcard(ast::WildcardBoundary::Extends(t)),
-  "?" "super" <t:QualifiedType>   => ast::TypeGeneric::Wildcard(ast::WildcardBoundary::Super(t)),
+ArraySuffix: usize = {
+  => 0,
+  "[" "]" <depth:ArraySuffix> => depth + 1,
 };
 
-pub TypeGenerics: Box<[ast::TypeGeneric]> = "<" <l:CommaList<TypeGeneric>?> ">" => l.unwrap_or(Box::from([]));
+PrimitiveType: ast::Type<'input> = {
+  "void" => ast::Type::Void,
+  "boolean" => ast::Type::Boolean,
+  "byte" => ast::Type::Byte,
+  "char" => ast::Type::Char,
+  "short" => ast::Type::Short,
+  "int" => ast::Type::Integer,
+  "long" => ast::Type::Long,
+  "float" => ast::Type::Float,
+  "double" => ast::Type::Double,
+};
 
-Type: ast::Type 
-  = <n:TypeName> <g:TypeGenerics?> <a:("[" "]")*>
-  => ast::Type {
-    name: n,
-    generics: g.unwrap_or(Box::from([])),
-    array_depth: a.len(),
+TypeGeneric: ast::GenericImpl<'input> = {
+  <t:QualifiedType>               => ast::GenericImpl::Type(t),
+  "?"                             => ast::GenericImpl::Wildcard(ast::GenericWildcardBoundary::None),
+  "?" "extends" <t:QualifiedType> => ast::GenericImpl::Wildcard(ast::GenericWildcardBoundary::Extends(t)),
+  "?" "super" <t:QualifiedType>   => ast::GenericImpl::Wildcard(ast::GenericWildcardBoundary::Super(t)),
+};
+
+pub TypeGenerics: Box<[ast::GenericImpl<'input>]> = "<" <l:CommaList<TypeGeneric>?> ">" => l.unwrap_or(Box::from([]));
+
+Type: ast::Type<'input> = {
+  <t:PrimitiveType> <a:ArraySuffix>
+  => ast::TypeBuilder::any(t).wrap_by_array(a).build(),
+
+  <n:IdentName> <g:TypeGenerics?> <a:ArraySuffix>
+  => ast::TypeBuilder::named(n)
+    .with_generic_impls(g.unwrap_or(Box::from([])))
+    .wrap_by_array(a)
+    .build(),
   };
 
-QualifiedType: ast::QualifiedType = PeriodList<Type> => <>;
+QualifiedType: ast::QualifiedType<'input>
+  = <items:PeriodList<Type>>
+  => ast::QualifiedTypeBuilder::new(items).build();
 
 #[inline]
-UnsafeIdentWithArray: (Cow<'input, str>, usize) 
-  = <i:UnsafeIdent> <a:("[" "]")*>
-  => (i, a.len());
+UnsafeIdentWithArray: (&'input str, usize)
+  = <i:UnsafeIdent> <a:ArraySuffix>
+  => (i, a);
 
-Variables: Box<[ast::Variable]> 
-  = <m:Modifiers> <t:QualifiedType> <i:CommaList<UnsafeIdentWithArray>> ";" 
-  => ast::Variable::new_array(m, t, i);
+Fields: Box<[ast::Field<'input>]>
+  = <m:Modifiers> <t:QualifiedType> <i:CommaList<UnsafeIdentWithArray>> ";"
+  => {
+    let mut names = i.into_vec();
+    let mut fields = Vec::with_capacity(names.len());
+    let mut base_modifiers = Some(m);
+    let mut base_type = Some(t);
 
-GenericDefinitionsExtends: Box<[ast::QualifiedType]> = "extends" <e:AmpersandList<QualifiedType>> => e;
+    while let Some((name, array_depth)) = names.pop() {
+      let modifiers = if names.is_empty() {
+        base_modifiers.take().unwrap()
+      } else {
+        base_modifiers.as_ref().unwrap().clone()
+      };
+      let ty = if names.is_empty() {
+        base_type.take().unwrap()
+      } else {
+        base_type.as_ref().unwrap().clone()
+      };
 
-GenericDefinition: ast::GenericDefinition
-  = <i:Ident> <e:GenericDefinitionsExtends?>
-  => ast::GenericDefinition { ident: i.to_string(), extends: e.unwrap_or(Box::new([])) };
+      fields.push(
+        ast::FieldBuilder::single(name)
+          .with_modifiers(modifiers)
+          .with_type(
+            ast::QualifiedTypeBuilder::new(ty)
+              .with_array_depth(array_depth)
+              .build()
+          )
+          .build()
+      );
+    }
 
-GenericDefinitions: Box<[ast::GenericDefinition]>
+    fields.reverse();
+    fields.into_boxed_slice()
+  };
+
+GenericDefinitionsExtends: Box<[ast::QualifiedType<'input>]> = "extends" <e:AmpersandList<QualifiedType>> => e;
+
+GenericDefinition: ast::GenericDecl<'input>
+  = <i:IdentName> <e:GenericDefinitionsExtends?>
+  => ast::GenericDeclBuilder::new(i)
+    .with_extends(e.unwrap_or(Box::new([])))
+    .build();
+
+GenericDefinitions: Box<[ast::GenericDecl<'input>]>
   = "<" <g:CommaList<GenericDefinition>> ">"
   => g;
 
-FunctionArgument: ast::FunctionArgument
-  = <m:Modifiers> <mut t:QualifiedType> <v:"..."?> <i:UnsafeIdent> <a:("[" "]")*> 
-  => ast::FunctionArgument {
-    modifiers: m,
-    r#type: { t.last_mut().unwrap().array_depth += a.len(); t },
-    ident: i.to_string(),
-    vararg: v.is_some(),
+FunctionArgument: ast::FunctionArgument<'input>
+  = <m:Modifiers> <t:QualifiedType> <v:"..."?> <i:UnsafeIdent> <a:ArraySuffix>
+  => {
+    let builder = ast::FunctionArgumentBuilder::new(i)
+      .with_modifiers(m)
+      .with_type(
+        ast::QualifiedTypeBuilder::new(t)
+          .with_array_depth(a)
+          .build()
+      );
+
+    if v.is_some() {
+      builder.with_vararg().build()
+    } else {
+      builder.build()
+    }
   };
 
-#[inline]
-FunctionEnd: () = { "{" "}", ";" };
+RecordField: ast::Field<'input>
+  = <arg:FunctionArgument>
+  => ast::FieldBuilder::single(arg.name)
+    .with_modifiers(arg.modifiers)
+    .with_type(arg.r#type)
+    .build();
 
 #[inline]
-FunctionReturnArraySuffix: usize = <a:("[" "]")*> => a.len();
+FunctionEnd: () = { "{" "}" => (), ";" => () };
 
-Function: ast::Function
-  = <m:Modifiers> <g:GenericDefinitions?> <mut rt:QualifiedType> <i:UnsafeIdent?> "(" <args:CommaList<FunctionArgument>?> ")" <a:FunctionReturnArraySuffix> ("throws" CommaList<QualifiedType>)? FunctionEnd
-  => {
-    rt.last_mut().unwrap().array_depth += a;
-    ast::Function {
-    modifiers: m,
-    generics: g.unwrap_or(Box::from([])),
-    return_type: rt,
-    ident: i.unwrap_or_else(|| Cow::from("__ctor")).to_string(),
-    arguments: args.unwrap_or(Box::from([]))
-  }};
+#[inline]
+FunctionReturnArraySuffix: usize = <a:ArraySuffix> => a;
 
-InterfaceEntry: ast::InterfaceEntry = {
-  <v:Variables> => ast::InterfaceEntry::Variables(v),
+Function: ast::Function<'input>
+  = <m:Modifiers> <g:GenericDefinitions?> <rt:QualifiedType> <i:UnsafeIdent?> "(" <args:CommaList<FunctionArgument>?> ")" <a:FunctionReturnArraySuffix> ("throws" CommaList<QualifiedType>)? FunctionEnd
+  => ast::FunctionBuilder::new(i.unwrap_or("__ctor"))
+      .with_modifiers(m)
+      .with_generic_decls(g.unwrap_or(Box::from([])))
+      .with_return_type(
+        ast::QualifiedTypeBuilder::new(rt)
+          .with_array_depth(a)
+          .build()
+      )
+      .with_args(args.unwrap_or(Box::from([])))
+      .build();
+
+InterfaceEntry: ast::InterfaceEntry<'input> = {
+  <v:Fields> => ast::InterfaceEntry::Fields(v),
   <f:Function> => ast::InterfaceEntry::Function(f),
   <c:Class> => ast::InterfaceEntry::Class(c),
   <e:Enum> => ast::InterfaceEntry::Enum(e),
@@ -240,20 +306,26 @@ InterfaceEntry: ast::InterfaceEntry = {
 };
 
 #[inline]
-ObjectPermits: Box<[ast::QualifiedType]> = "permits" <l:CommaList<QualifiedType>> => l;
+ObjectPermits: Box<[ast::QualifiedType<'input>]> = "permits" <l:CommaList<QualifiedType>> => l;
 
 #[inline]
-InterfaceExtends: Box<[ast::QualifiedType]> = "extends" <t:CommaList<QualifiedType>> => t;
+InterfaceExtends: Box<[ast::QualifiedType<'input>]> = "extends" <t:CommaList<QualifiedType>> => t;
 
-Interface: ast::Interface
-  = <m:Modifiers> "interface" <i:Ident> <g:GenericDefinitions?> <ex:InterfaceExtends?> <p:ObjectPermits?> "{" <e:OptionalSemicolonList<InterfaceEntry>?> "}"
-  => ast::Interface::from((m, i, g, ex, p, e));
+Interface: ast::Interface<'input>
+  = <m:Modifiers> "interface" <i:IdentName> <g:GenericDefinitions?> <ex:InterfaceExtends?> <p:ObjectPermits?> "{" <e:OptionalSemicolonList<InterfaceEntry>?> "}"
+  => ast::InterfaceBuilder::new(i)
+    .with_modifiers(m)
+    .with_generic_decls(g.unwrap_or(Box::from([])))
+    .with_extends(ex.unwrap_or(Box::from([])))
+    .with_permits(p.unwrap_or(Box::from([])))
+    .with_entries(e.unwrap_or(Box::from([])))
+    .build();
 
 #[inline]
-ObjectImplements: Box<[ast::QualifiedType]> = "implements" <l:CommaList<QualifiedType>> => l;
+ObjectImplements: Box<[ast::QualifiedType<'input>]> = "implements" <l:CommaList<QualifiedType>> => l;
 
-ClassEntry: ast::ClassEntry = {
-  <v:Variables> => ast::ClassEntry::Variables(v),
+ClassEntry: ast::ClassEntry<'input> = {
+  <v:Fields> => ast::ClassEntry::Fields(v),
   <f:Function> => ast::ClassEntry::Function(f),
   <c:Class> => ast::ClassEntry::Class(c),
   <e:Enum> => ast::ClassEntry::Enum(e),
@@ -263,22 +335,40 @@ ClassEntry: ast::ClassEntry = {
 };
 
 #[inline]
-ClassExtends: ast::QualifiedType = "extends" <t:QualifiedType> => t;
+ClassExtends: ast::QualifiedType<'input> = "extends" <t:QualifiedType> => t;
 
-Class: ast::Class = {
-  <m:Modifiers> "class" <i:Ident> <g:GenericDefinitions?> <ex:ClassExtends?> <im:ObjectImplements?> <p:ObjectPermits?> "{" <en:OptionalSemicolonList<ClassEntry>?> "}"
-  => ast::Class::from((m, i, g, ex, im, p, en)),
+Class: ast::Class<'input> = {
+  <m:Modifiers> "class" <i:IdentName> <g:GenericDefinitions?> <ex:ClassExtends?> <im:ObjectImplements?> <p:ObjectPermits?> "{" <en:OptionalSemicolonList<ClassEntry>?> "}"
+  => {
+    let builder = ast::ClassBuilder::class(i)
+      .with_modifiers(m)
+      .with_generic_decls(g.unwrap_or(Box::from([])))
+      .with_implements(im.unwrap_or(Box::from([])))
+      .with_permits(p.unwrap_or(Box::from([])))
+      .with_entries(en.unwrap_or(Box::from([])));
 
-  <m:Modifiers> "record" <i:Ident> <g:GenericDefinitions?> "(" <a:CommaList<FunctionArgument>?> ")" <im:ObjectImplements?> "{" <en:OptionalSemicolonList<ClassEntry>?> "}"
-  => ast::Class::from((m, i, g, a, im, en)),
+    if let Some(ex) = ex {
+      builder.with_extend(ex).build()
+    } else {
+      builder.build()
+    }
+  },
+
+  <m:Modifiers> "record" <i:IdentName> <g:GenericDefinitions?> "(" <a:CommaList<RecordField>?> ")" <im:ObjectImplements?> "{" <en:OptionalSemicolonList<ClassEntry>?> "}"
+  => ast::ClassBuilder::record(i, a.unwrap_or(Box::from([])))
+    .with_modifiers(m)
+    .with_generic_decls(g.unwrap_or(Box::from([])))
+    .with_implements(im.unwrap_or(Box::from([])))
+    .with_entries(en.unwrap_or(Box::from([])))
+    .build(),
 };
 
 #[inline]
-EnumVariant: () = Ident ("(" ")")? ("{" "}")?;
+EnumVariant: () = IdentName ("(" ")")? ("{" "}")?;
 
 #[inline]
-EnumEntry: ast::EnumEntry = {
-  <v:Variables> => ast::EnumEntry::Variables(v),
+EnumEntry: ast::EnumEntry<'input> = {
+  <v:Fields> => ast::EnumEntry::Fields(v),
   <f:Function> => ast::EnumEntry::Function(f),
   <c:Class> => ast::EnumEntry::Class(c),
   <e:Enum> => ast::EnumEntry::Enum(e),
@@ -287,21 +377,34 @@ EnumEntry: ast::EnumEntry = {
 };
 
 #[inline]
-EnumBody: Box<[ast::EnumEntry]> = {
+EnumBody: Box<[ast::EnumEntry<'input>]> = {
   MayBeTrailingCommaList<EnumVariant> ";"?             => Box::from([]),
   MayBeTrailingCommaList<EnumVariant> ";" <OptionalSemicolonList<EnumEntry>> => <>,
 };
 
-Enum: ast::Enum
-  = <m:Modifiers> "enum" <i:Ident> <g:GenericDefinitions?> <im:ObjectImplements?> "{" <b:EnumBody?> "}"
-  => ast::Enum::from((m, i, g, im, b));
+Enum: ast::Enum<'input>
+  = <m:Modifiers> "enum" <i:IdentName> <g:GenericDefinitions?> <im:ObjectImplements?> "{" <b:EnumBody?> "}"
+  => ast::EnumBuilder::new(i)
+    .with_modifiers(m)
+    .with_generic_decls(g.unwrap_or(Box::from([])))
+    .with_implements(im.unwrap_or(Box::from([])))
+    .with_entries(b.unwrap_or(Box::from([])))
+    .build();
 
-RootEntry: ast::RootEntry = {
+RootEntry: ast::RootEntry<'input> = {
   <c:Class> => ast::RootEntry::Class(c),
   <e:Enum> => ast::RootEntry::Enum(e),
   <i:Interface> => ast::RootEntry::Interface(i),
 };
 
-pub Root: ast::Root
+pub Root: ast::Root<'input>
   = <p:Package> <i:Import*> <e:OptionalSemicolonList<RootEntry>?>
-  => ast::Root::from((p, i, e));
+  => {
+    let mut imports = i;
+    imports.push("java.lang.*");
+
+    ast::RootBuilder::new(p)
+      .with_imports(imports)
+      .with_entries(e.unwrap_or(Box::from([])))
+      .build()
+  };
