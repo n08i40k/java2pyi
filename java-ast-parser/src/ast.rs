@@ -1,10 +1,6 @@
 use bitflags::bitflags;
 use std::ops::{Deref, DerefMut};
 
-pub trait GetIdent {
-    fn ident(&self) -> &str;
-}
-
 bitflags! {
     #[derive(Debug, Clone, PartialEq)]
     pub struct Modifiers: u16 {
@@ -689,12 +685,6 @@ impl<'a, const RECORD: bool> ClassBuilder<'a, RECORD> {
     }
 }
 
-impl<'a> GetIdent for Class<'a> {
-    fn ident(&self) -> &str {
-        self.name
-    }
-}
-
 #[derive(Debug, Clone)]
 pub(super) enum EnumEntry<'a> {
     Fields(Box<[Field<'a>]>),
@@ -719,12 +709,6 @@ pub struct Enum<'a> {
     pub classes: Box<[Class<'a>]>,
     pub enums: Box<[Enum<'a>]>,
     pub interfaces: Box<[Interface<'a>]>,
-}
-
-impl<'a> GetIdent for Enum<'a> {
-    fn ident(&self) -> &str {
-        self.name
-    }
 }
 
 pub(crate) struct EnumBuilder<'a> {
@@ -833,12 +817,6 @@ pub struct Interface<'a> {
     pub classes: Box<[Class<'a>]>,
     pub enums: Box<[Enum<'a>]>,
     pub interfaces: Box<[Interface<'a>]>,
-}
-
-impl<'a> GetIdent for Interface<'a> {
-    fn ident(&self) -> &str {
-        self.name
-    }
 }
 
 pub(crate) struct InterfaceBuilder<'a> {
