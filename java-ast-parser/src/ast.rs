@@ -1,5 +1,4 @@
 use bitflags::bitflags;
-use ownable::traits::IntoOwned;
 use std::ops::{Deref, DerefMut};
 
 pub trait GetIdent {
@@ -26,14 +25,6 @@ bitflags! {
         const STRICTFP      = 1 << 12;
 
         const DEFAULT       = 1 << 13;
-    }
-}
-
-impl IntoOwned for Modifiers {
-    type Owned = Modifiers;
-
-    fn into_owned(self) -> Self::Owned {
-        self
     }
 }
 
