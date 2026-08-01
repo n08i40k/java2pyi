@@ -2,3 +2,4 @@
 /out
 /java
 /.idea
+/.cargo/config.toml

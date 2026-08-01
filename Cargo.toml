@@ -1,21 +1,22 @@
-[workspace]
-members = ["java-ast-parser"]
-
 [package]
 name = "java2pyi"
 version = "1.1.1"
 edition = "2024"
 license = "MIT"
-keywords = ["java", "ast", "parser", "codegen"]
+keywords = ["java", "jar", "codegen"]
 categories = ["command-line-utilities"]
-description = "Java source to Python stubs for mypy/pyright"
+description = "Java class files to Python stubs for mypy/pyright"
 repository = "https://github.com/n08i40k/java2pyi"
 readme = "README.md"
 
-exclude = ["java-ast-parser/**"]
-
 [dependencies]
-java-ast-parser = { version = "1.0.0", path = "java-ast-parser" }
-orx-tree = "2.2.0"
+anyhow = "1.0.104"
+bitflags = "2.11.1"
+bumpalo = { version = "3.20.3", features = ["collections"] }
 env_logger = "0.11.10"
+jvm-class = "0.1.0"
+memmap2 = "0.9.11"
+orx-tree = "2.2.0"
 rayon = "1.12.0"
+tempfile = "3.27.0"
+zip = { version = "8.6.0", default-features = false, features = ["deflate"] }

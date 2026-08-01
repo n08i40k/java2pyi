@@ -1,58 +1,47 @@
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::borrow::Cow;
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::{
     Arc,
     atomic::{AtomicUsize, Ordering},
 };
 
-use crate::index_tree::LocalIndexTree;
+use crate::exclude::Exclusions;
+use crate::index_tree::GlobalIndexTree;
+use crate::ir::{self, ClassType, Method, Modifiers, Type, TypeParameter};
 use crate::model::{
-    ClassRef, EnumRef, Exclusions, InterfaceRef, ResolvedType, Root, TypeRef, array_depth,
-    named_type, primitive_python_type,
+    ClassRef, Root, array_depth, base_type, object_parts, primitive_python_type, type_args,
 };
-use crate::{preprocess::Scope, status};
-use java_ast_parser::ast::{self, Function, GenericImpl, GenericWildcardBoundary, Modifiers};
+use crate::{scope::Scope, status};
 use rayon::prelude::{IntoParallelIterator, ParallelIterator};
 
 const PYI_PACKAGE: &str = "java2pyi";
 const PYI_TYPES_SUBPACKAGE: &str = "types";
 
-trait QualifiedTypeFormat {
-    fn fmt(&self) -> String;
-}
-
-impl QualifiedTypeFormat for ast::QualifiedType<'_> {
-    fn fmt(&self) -> String {
-        self.iter()
-            .map(|x| x.to_string())
-            .collect::<Box<[_]>>()
-            .join(".")
-    }
-}
-
-pub fn write_pyi_by_package<E>(
-    scopes: &[Scope],
+pub fn write_pyi_by_package<'a, E>(
+    scopes: &[Scope<'a>],
     mixer_records: HashMap<String, String>,
-    exclusions: Arc<Exclusions>,
+    exclusions: Arc<Exclusions<'a>>,
     write_package: impl Fn(&str, String) -> Result<(), E> + Sync,
 ) -> Result<(), E>
 where
     E: Send,
 {
     let definition_paths = Arc::new(collect_definition_paths(
-        scopes.iter().map(|scope| scope.ast.as_ref()),
+        scopes.iter().map(|scope| scope.root),
         &exclusions,
     ));
 
     let mut scopes_by_package: HashMap<&str, Vec<&Scope>> = HashMap::new();
     for scope in scopes {
         scopes_by_package
-            .entry(scope.ast.ast().package)
+            .entry(scope.root.ir().package)
             .or_default()
             .push(scope);
     }
 
     let total_packages = scopes_by_package.len();
     status::update(&format!("Serializing 0/{}", total_packages));
+
     let progress = AtomicUsize::new(0);
     let mixer = Mixer::new(mixer_records);
 
@@ -62,6 +51,17 @@ where
             let module_imports =
                 collect_module_imports(&package_scopes, &definition_paths, &exclusions);
 
+            let has_deprecated = sanitize_path(package) != package
+                || package_scopes.iter().any(|scope| {
+                    scope
+                        .root
+                        .ir()
+                        .classes
+                        .iter()
+                        .map(ClassRef::new)
+                        .any(|class_cell| uses_deprecated(class_cell, &exclusions, false))
+                });
+
             let mut emitter = PyiEmitter::new(
                 definition_paths.clone(),
                 module_imports,
@@ -69,24 +69,21 @@ where
                 exclusions.clone(),
             );
 
-            emitter.emit_header();
+            emitter.emit_header(has_deprecated);
 
             let empty_type_params = BTreeSet::new();
             for scope in &package_scopes {
-                let ast = scope.ast.ast();
-                for class_cell in ast.classes.iter().map(ClassRef::new) {
-                    emitter.emit_class(class_cell, &scope.local_index_tree, &empty_type_params);
-                }
-                for interface_cell in ast.interfaces.iter().map(InterfaceRef::new) {
-                    emitter.emit_interface(
-                        interface_cell,
-                        &scope.local_index_tree,
+                for class_cell in scope.root.ir().classes.iter().map(ClassRef::new) {
+                    emitter.emit_class(
+                        class_cell,
+                        &scope.index_tree,
                         &empty_type_params,
+                        &[],
+                        false,
                     );
                 }
-                for enum_cell in ast.enums.iter().map(EnumRef::new) {
-                    emitter.emit_enum(enum_cell, &scope.local_index_tree, &empty_type_params);
-                }
+
+                emitter.emit_deferred(&scope.index_tree);
             }
 
             let completed = progress.fetch_add(1, Ordering::Relaxed) + 1;
@@ -100,7 +97,7 @@ where
                 completed, total_packages, label
             ));
 
-            write_package(package, emitter.finish())
+            write_package(&sanitize_path(package), emitter.finish())
         })?;
 
     let mixer_package = format!("{PYI_PACKAGE}.{PYI_TYPES_SUBPACKAGE}");
@@ -150,7 +147,10 @@ impl Mixer {
         Self {
             records: records
                 .into_iter()
-                .map(|(k, v)| (k.clone(), MixerEntry::new(k, v)))
+                .map(|(k, v)| {
+                    let k = sanitize_path(&k).into_owned();
+                    (k.clone(), MixerEntry::new(k, v))
+                })
                 .collect(),
         }
     }
@@ -163,19 +163,23 @@ impl Mixer {
     }
 
     pub fn gen_stub(&self) -> String {
-        let imports = self
-            .records
-            .values()
-            .map(|entry| entry.from_java_ty.rsplit_once(".").unwrap().0.to_string())
-            .collect::<HashSet<String>>()
+        let mut entries = self.records.values().collect::<Vec<_>>();
+        entries.sort_by(|left, right| left.from_java_ty.cmp(&right.from_java_ty));
+
+        let mut namespaces = entries
+            .iter()
+            .map(|entry| entry.from_java_ty.rsplit_once(".").unwrap().0)
+            .collect::<Vec<_>>();
+        namespaces.dedup();
+
+        let imports = namespaces
             .into_iter()
             .map(|ns| format!("import {ns}"))
             .collect::<Box<[_]>>()
             .join("\n");
 
-        let body = self
-            .records
-            .values()
+        let body = entries
+            .into_iter()
             .map(MixerEntry::gen_union)
             .collect::<Box<[_]>>()
             .join("\n");
@@ -184,21 +188,27 @@ impl Mixer {
     }
 }
 
-struct PyiEmitter<'a> {
+struct PyiEmitter<'a, 'm> {
     output: String,
     indent: usize,
-    type_renderer: TypeRenderer<'a>,
-    definition_paths: Arc<DefinitionPaths>,
+    type_renderer: TypeRenderer<'a, 'm>,
+    definition_paths: Arc<DefinitionPaths<'a>>,
     module_imports: BTreeSet<String>,
-    exclusions: Arc<Exclusions>,
+    exclusions: Arc<Exclusions<'a>>,
+    deferred: VecDeque<DeferredClass<'a>>,
 }
 
-impl<'a> PyiEmitter<'a> {
+struct DeferredClass<'a> {
+    class: ClassRef<'a>,
+    scope_params: Vec<TypeParameter<'a>>,
+}
+
+impl<'a, 'm> PyiEmitter<'a, 'm> {
     fn new(
-        definition_paths: Arc<DefinitionPaths>,
+        definition_paths: Arc<DefinitionPaths<'a>>,
         module_imports: BTreeSet<String>,
-        mixer: &'a Mixer,
-        exclusions: Arc<Exclusions>,
+        mixer: &'m Mixer,
+        exclusions: Arc<Exclusions<'a>>,
     ) -> Self {
         Self {
             output: String::new(),
@@ -207,42 +217,58 @@ impl<'a> PyiEmitter<'a> {
             definition_paths,
             module_imports,
             exclusions,
+            deferred: VecDeque::new(),
         }
     }
 
-    fn emit_header(&mut self) {
+    fn emit_header(&mut self, has_deprecated: bool) {
         self.line("from __future__ import annotations".to_string());
         self.line(format!("import {}.{}", PYI_PACKAGE, PYI_TYPES_SUBPACKAGE));
         let module_imports = std::mem::take(&mut self.module_imports);
         for module_import in module_imports {
-            self.line(format!("import {}", module_import));
+            self.line(format!("import {}", sanitize_path(&module_import)));
         }
-        self.line("from typing import Any, overload".to_string());
+        self.line("from typing import Any, ClassVar, overload".to_string());
+        if has_deprecated {
+            self.line("from typing_extensions import deprecated".to_string());
+        }
         self.blank_line();
+    }
+
+    fn emit_deferred(&mut self, index_tree: &GlobalIndexTree<'a>) {
+        let empty_type_params = BTreeSet::new();
+
+        while let Some(deferred) = self.deferred.pop_front() {
+            self.emit_class(
+                deferred.class,
+                index_tree,
+                &empty_type_params,
+                &deferred.scope_params,
+                false,
+            );
+        }
     }
 
     fn emit_class(
         &mut self,
-        class_cell: ClassRef,
-        local_index_tree: &LocalIndexTree,
+        class_cell: ClassRef<'a>,
+        index_tree: &GlobalIndexTree<'a>,
         outer_type_params: &BTreeSet<String>,
+        scope_params: &[TypeParameter<'a>],
+        nested: bool,
     ) {
-        if self.exclusions.contains(TypeRef::Class(class_cell)) {
+        if self.exclusions.contains(class_cell) {
             return;
         }
-        let class = class_cell.borrow();
-        let class_type_params = extend_type_params(outer_type_params, &class.generic_decls);
-        let type_params_suffix = format_type_params(&class.generic_decls);
-        let class_path = self.definition_paths.class_path(&class_cell);
-        let mut rendered_bases = collect_class_base_types(
-            class,
-            &self.type_renderer,
-            local_index_tree,
-            class_cell,
-            &class_type_params,
-        );
+        let class = &*class_cell;
+        let declared_type_params = declared_type_params(class, scope_params);
+        let class_type_params = extend_type_params(outer_type_params, &declared_type_params);
+        let type_params_suffix = format_type_params(&declared_type_params);
+        let class_path = self.definition_paths.path(&class_cell);
+        let mut rendered_bases =
+            collect_base_types(class, &self.type_renderer, index_tree, &class_type_params);
         let mut inserted_special_base = false;
-        if let Some(special_base) = java_stdlib_python_base(&class_path, &class.generic_decls)
+        if let Some(special_base) = java_stdlib_python_base(&class_path, class.type_params)
             && !rendered_bases
                 .bases
                 .iter()
@@ -251,23 +277,37 @@ impl<'a> PyiEmitter<'a> {
             rendered_bases.bases.insert(0, special_base);
             inserted_special_base = true;
         }
-        if class_path != "java.lang.Object" && class.extend.is_none() {
-            let object_base = "java.lang.Object".to_string();
-            if !rendered_bases.bases.iter().any(|base| base == &object_base) {
-                let insert_at = if inserted_special_base { 1 } else { 0 };
-                let bounded_index = insert_at.min(rendered_bases.bases.len());
-                rendered_bases.bases.insert(bounded_index, object_base);
+
+        let bases_suffix = match class.r#type {
+            ClassType::Class => {
+                if class_path != "java.lang.Object" && class.extends.is_none() {
+                    let object_base = "java.lang.Object".to_string();
+                    if !rendered_bases.bases.iter().any(|base| base == &object_base) {
+                        let insert_at = if inserted_special_base { 1 } else { 0 };
+                        let bounded_index = insert_at.min(rendered_bases.bases.len());
+                        rendered_bases.bases.insert(bounded_index, object_base);
+                    }
+                }
+
+                if rendered_bases.bases.is_empty() {
+                    String::new()
+                } else {
+                    format!("({})", rendered_bases.bases.join(", "))
+                }
             }
-        }
-        let bases_suffix = if rendered_bases.bases.is_empty() {
-            String::new()
-        } else {
-            format!("({})", rendered_bases.bases.join(", "))
+            ClassType::Interface | ClassType::Enum => {
+                if rendered_bases.bases.is_empty() {
+                    "(java.lang.Object)".to_string()
+                } else {
+                    format!("(java.lang.Object, {})", rendered_bases.bases.join(", "))
+                }
+            }
         };
 
+        let emitted_name = sanitize_ident(class.name);
         let mut line = format!(
             "class {}{}{}:",
-            class.name, type_params_suffix, bases_suffix
+            emitted_name, type_params_suffix, bases_suffix
         );
         if !rendered_bases.unknown.is_empty() {
             line.push_str(&format!(
@@ -276,173 +316,127 @@ impl<'a> PyiEmitter<'a> {
                 class_path
             ));
         }
+
+        let emitted_path = sanitize_path(&class_path);
+
+        let mut notes = Vec::new();
+        if let Some(fqn) = class.anonymous {
+            notes.push(format!("Anonymous class {}", fqn));
+        } else if nested && class.modifiers.contains(Modifiers::PRIVATE) {
+            notes.push(format!("Private class {}", emitted_path));
+        }
+        if class.anonymous.is_none() && emitted_path != class_path {
+            notes.push(format!("Renamed from {}", class_path));
+        }
+        if !notes.is_empty() {
+            self.line(format!("@deprecated(\"{}\")", notes.join("; ")));
+        }
+
         self.line(line);
         self.indent += 1;
 
         let mut has_members = false;
 
-        for variable in &class.fields {
+        let docstring = match class.r#type {
+            ClassType::Interface => Some("Java interface."),
+            ClassType::Class if class.modifiers.contains(Modifiers::ABSTRACT) => {
+                Some("Java abstract class.")
+            }
+            _ => None,
+        };
+
+        if let Some(docstring) = docstring {
+            has_members = true;
+            self.line(format!("\"\"\"{}\"\"\"", docstring));
+        }
+
+        for variable in class.fields {
             has_members = true;
             let rendered = self.type_renderer.render_in_scope(
                 &class_path,
                 &variable.r#type,
-                local_index_tree,
-                Some(class_cell),
+                index_tree,
                 &class_type_params,
             );
             let ident = sanitize_ident(variable.name);
-            let mut line = format!("{}: {}", ident, rendered.text);
+            let mut line = if variable.modifiers.contains(Modifiers::STATIC) {
+                format!("{}: ClassVar[{}]", ident, rendered.text)
+            } else {
+                format!("{}: {}", ident, rendered.text)
+            };
+
+            let mut notes = Vec::new();
             if rendered.has_unknown() {
-                line.push_str(&format!(
-                    "  # unknown type(s) [{}] used in {}.{}",
+                notes.push(format!(
+                    "unknown type(s) [{}] used in {}.{}",
                     rendered.unknown.join(", "),
                     class_path,
                     variable.name
                 ));
             }
+            if ident != variable.name {
+                notes.push(format!("renamed from {}.{}", class_path, variable.name));
+            }
+            if !notes.is_empty() {
+                line.push_str(&format!("  # {}", notes.join("; ")));
+            }
+
             self.line(line);
         }
 
-        let function_groups = group_functions(&class.functions);
-        for function_group in function_groups {
-            let use_overload = function_group.len() > 1;
-            for function in function_group {
+        let method_groups = group_methods(class.methods);
+        for method_group in method_groups {
+            let use_overload = method_group.len() > 1;
+            for method in method_group {
                 has_members = true;
-                let function_type_params =
-                    extend_type_params(&class_type_params, &function.generic_decls);
-                self.emit_function(
-                    function,
+                let method_type_params = extend_type_params(&class_type_params, method.type_params);
+                self.emit_method(
+                    method,
                     use_overload,
                     &class_path,
-                    local_index_tree,
-                    Some(class_cell),
-                    &function_type_params,
+                    index_tree,
+                    &method_type_params,
                 );
             }
         }
 
-        for nested_class in class.classes.iter().map(ClassRef::new) {
-            has_members = true;
-            self.emit_class(nested_class, local_index_tree, &class_type_params);
-        }
-        for nested_interface in class.interfaces.iter().map(InterfaceRef::new) {
-            has_members = true;
-            self.emit_interface(nested_interface, local_index_tree, &class_type_params);
-        }
-        for nested_enum in class.enums.iter().map(EnumRef::new) {
-            has_members = true;
-            self.emit_enum(nested_enum, local_index_tree, &class_type_params);
-        }
-
-        if !has_members {
-            self.line("...".to_string());
-        }
-
-        self.indent -= 1;
-        self.blank_line();
-    }
-
-    fn emit_interface(
-        &mut self,
-        interface_cell: InterfaceRef,
-        local_index_tree: &LocalIndexTree,
-        outer_type_params: &BTreeSet<String>,
-    ) {
-        if self.exclusions.contains(TypeRef::Interface(interface_cell)) {
-            return;
-        }
-        let interface = interface_cell.borrow();
-        let interface_type_params = extend_type_params(outer_type_params, &interface.generic_decls);
-        let type_params_suffix = format_type_params(&interface.generic_decls);
-        let interface_path = self.definition_paths.interface_path(&interface_cell);
-        let mut rendered_bases = collect_interface_base_types(
-            interface,
-            &self.type_renderer,
-            local_index_tree,
-            &interface_type_params,
-        );
-        if let Some(special_base) =
-            java_stdlib_python_base(&interface_path, &interface.generic_decls)
-            && !rendered_bases
-                .bases
+        // Names declared here shadow the enclosing ones, so they must not be carried twice.
+        let child_scope_params = if class.children.is_empty() {
+            Vec::new()
+        } else {
+            scope_params
                 .iter()
-                .any(|base| base == &special_base)
-        {
-            rendered_bases.bases.insert(0, special_base);
-        }
-        let bases_suffix = if rendered_bases.bases.is_empty() {
-            "(java.lang.Object)".to_string()
-        } else {
-            format!("(java.lang.Object, {})", rendered_bases.bases.join(", "))
+                .filter(|outer| {
+                    !declared_type_params
+                        .iter()
+                        .any(|declared| declared.name == outer.name)
+                })
+                .chain(declared_type_params.as_ref())
+                .copied()
+                .collect()
         };
 
-        let mut line = format!(
-            "class {}{}{}:",
-            interface.name, type_params_suffix, bases_suffix
-        );
-        if !rendered_bases.unknown.is_empty() {
-            line.push_str(&format!(
-                "  # unknown type(s) [{}] used in {}",
-                rendered_bases.unknown.join(", "),
-                interface_path
-            ));
-        }
-        self.line(line);
-        self.indent += 1;
+        for child in class.children.iter().map(ClassRef::new) {
+            if self.exclusions.contains(child) {
+                continue;
+            }
 
-        let mut has_members = false;
+            if child.anonymous.is_some() {
+                self.deferred.push_back(DeferredClass {
+                    class: child,
+                    scope_params: child_scope_params.clone(),
+                });
+                continue;
+            }
 
-        for variable in &interface.fields {
             has_members = true;
-            let rendered = self.type_renderer.render_in_scope(
-                &interface_path,
-                &variable.r#type,
-                local_index_tree,
-                None,
-                &interface_type_params,
+            self.emit_class(
+                child,
+                index_tree,
+                &class_type_params,
+                &child_scope_params,
+                true,
             );
-            let ident = sanitize_ident(variable.name);
-            let mut line = format!("{}: {}", ident, rendered.text);
-            if rendered.has_unknown() {
-                line.push_str(&format!(
-                    "  # unknown type(s) [{}] used in {}.{}",
-                    rendered.unknown.join(", "),
-                    interface_path,
-                    variable.name
-                ));
-            }
-            self.line(line);
-        }
-
-        let function_groups = group_functions(&interface.functions);
-        for function_group in function_groups {
-            let use_overload = function_group.len() > 1;
-            for function in function_group {
-                has_members = true;
-                let function_type_params =
-                    extend_type_params(&interface_type_params, &function.generic_decls);
-                self.emit_function(
-                    function,
-                    use_overload,
-                    &interface_path,
-                    local_index_tree,
-                    None,
-                    &function_type_params,
-                );
-            }
-        }
-
-        for nested_class in interface.classes.iter().map(ClassRef::new) {
-            has_members = true;
-            self.emit_class(nested_class, local_index_tree, &interface_type_params);
-        }
-        for nested_interface in interface.interfaces.iter().map(InterfaceRef::new) {
-            has_members = true;
-            self.emit_interface(nested_interface, local_index_tree, &interface_type_params);
-        }
-        for nested_enum in interface.enums.iter().map(EnumRef::new) {
-            has_members = true;
-            self.emit_enum(nested_enum, local_index_tree, &interface_type_params);
         }
 
         if !has_members {
@@ -453,132 +447,48 @@ impl<'a> PyiEmitter<'a> {
         self.blank_line();
     }
 
-    fn emit_enum(
+    fn emit_method(
         &mut self,
-        enum_cell: EnumRef,
-        local_index_tree: &LocalIndexTree,
-        outer_type_params: &BTreeSet<String>,
-    ) {
-        if self.exclusions.contains(TypeRef::Enum(enum_cell)) {
-            return;
-        }
-        let r#enum = enum_cell.borrow();
-        let enum_type_params = extend_type_params(outer_type_params, &r#enum.generic_decls);
-        let type_params_suffix = format_type_params(&r#enum.generic_decls);
-        let enum_path = self.definition_paths.enum_path(&enum_cell);
-        let rendered_bases = collect_enum_base_types(
-            r#enum,
-            &self.type_renderer,
-            local_index_tree,
-            &enum_type_params,
-        );
-        let bases = rendered_bases.bases;
-        let bases_suffix = if bases.is_empty() {
-            "(java.lang.Object)".to_string()
-        } else {
-            format!("(java.lang.Object, {})", bases.join(", "))
-        };
-
-        let mut line = format!(
-            "class {}{}{}:",
-            r#enum.name, type_params_suffix, bases_suffix
-        );
-        if !rendered_bases.unknown.is_empty() {
-            line.push_str(&format!(
-                "  # unknown type(s) [{}] used in {}",
-                rendered_bases.unknown.join(", "),
-                enum_path
-            ));
-        }
-        self.line(line);
-        self.indent += 1;
-
-        let mut has_members = false;
-
-        for variable in &r#enum.fields {
-            has_members = true;
-            let rendered = self.type_renderer.render_in_scope(
-                &enum_path,
-                &variable.r#type,
-                local_index_tree,
-                None,
-                &enum_type_params,
-            );
-            let ident = sanitize_ident(variable.name);
-            let mut line = format!("{}: {}", ident, rendered.text);
-            if rendered.has_unknown() {
-                line.push_str(&format!(
-                    "  # unknown type(s) [{}] used in {}.{}",
-                    rendered.unknown.join(", "),
-                    enum_path,
-                    variable.name
-                ));
-            }
-            self.line(line);
-        }
-
-        let function_groups = group_functions(&r#enum.functions);
-        for function_group in function_groups {
-            let use_overload = function_group.len() > 1;
-            for function in function_group {
-                has_members = true;
-                let function_type_params =
-                    extend_type_params(&enum_type_params, &function.generic_decls);
-                self.emit_function(
-                    function,
-                    use_overload,
-                    &enum_path,
-                    local_index_tree,
-                    None,
-                    &function_type_params,
-                );
-            }
-        }
-
-        for nested_class in r#enum.classes.iter().map(ClassRef::new) {
-            has_members = true;
-            self.emit_class(nested_class, local_index_tree, &enum_type_params);
-        }
-        for nested_interface in r#enum.interfaces.iter().map(InterfaceRef::new) {
-            has_members = true;
-            self.emit_interface(nested_interface, local_index_tree, &enum_type_params);
-        }
-        for nested_enum in r#enum.enums.iter().map(EnumRef::new) {
-            has_members = true;
-            self.emit_enum(nested_enum, local_index_tree, &enum_type_params);
-        }
-
-        if !has_members {
-            self.line("...".to_string());
-        }
-
-        self.indent -= 1;
-        self.blank_line();
-    }
-
-    fn emit_function(
-        &mut self,
-        function: &Function<'_>,
+        method: &Method<'_>,
         use_overload: bool,
         class_path: &str,
-        local_index_tree: &LocalIndexTree,
-        scope: Option<ClassRef>,
+        index_tree: &GlobalIndexTree<'a>,
         type_params: &BTreeSet<String>,
     ) {
         if use_overload {
             self.line("@overload".to_string());
         }
 
-        let is_static = function.modifiers.intersects(Modifiers::STATIC);
-        let is_ctor = function.name == "__ctor";
+        let is_static = method.modifiers.intersects(Modifiers::STATIC);
+        let is_ctor = method.name == "__ctor";
+        let emitted_name = if is_ctor {
+            Cow::Borrowed("__init__")
+        } else {
+            sanitize_ident(method.name)
+        };
 
         if is_static {
             self.line("@staticmethod".to_string());
         }
 
-        let mut args = Vec::with_capacity(function.args.len() + usize::from(!is_static));
+        let mut notes = Vec::new();
+        if method.modifiers.contains(Modifiers::PRIVATE) {
+            notes.push(format!(
+                "Private method {}.{}",
+                sanitize_path(class_path),
+                emitted_name
+            ));
+        }
+        if !is_ctor && emitted_name != method.name {
+            notes.push(format!("Renamed from {}.{}", class_path, method.name));
+        }
+        if !notes.is_empty() {
+            self.line(format!("@deprecated(\"{}\")", notes.join("; ")));
+        }
+
+        let mut args = Vec::with_capacity(method.args.len() + usize::from(!is_static));
         if !is_static {
-            if class_path == "java.lang.Object" && function.name == "getClass" {
+            if class_path == "java.lang.Object" && method.name == "getClass" {
                 args.push("self = None".to_string());
             } else {
                 args.push("self".to_string());
@@ -586,73 +496,85 @@ impl<'a> PyiEmitter<'a> {
         }
 
         let mut unknown_paths = HashMap::new();
-        for argument in &function.args {
+        let mut renamed_args = Vec::new();
+        for argument in method.args {
             let rendered = self.type_renderer.render_in_scope(
                 class_path,
                 &argument.r#type,
-                local_index_tree,
-                scope,
+                index_tree,
                 type_params,
             );
 
             let arg_prefix = if argument.vararg { "*" } else { "" };
-            let ident = sanitize_ident(argument.name);
+            let ident = match sanitize_ident(argument.name) {
+                ident if !is_static && ident == "self" => Cow::Owned(format!("{}_", ident)),
+                ident => ident,
+            };
 
             args.push(format!("{}{}: {}", arg_prefix, ident, rendered.text));
 
+            if ident != argument.name {
+                renamed_args.push(format!("{}.{}.{}", class_path, method.name, argument.name));
+            }
+
             if rendered.has_unknown() {
                 unknown_paths.insert(
-                    format!("{}.{}.{}", class_path, function.name, argument.name),
+                    format!("{}.{}.{}", class_path, method.name, argument.name),
                     rendered.unknown,
                 );
             }
         }
 
-        let rendered_return = if is_ctor {
-            self.type_renderer.render_constructor_return(
+        let rendered_return = match &method.return_type {
+            None => RenderedType::known("None".to_string()),
+            Some(return_type) if is_ctor => self.type_renderer.render_constructor_return(
                 class_path,
-                &function.return_type,
-                local_index_tree,
-                scope,
+                return_type,
+                index_tree,
                 type_params,
-            )
-        } else {
-            self.type_renderer.render_in_scope(
-                class_path,
-                &function.return_type,
-                local_index_tree,
-                scope,
-                type_params,
-            )
+            ),
+            Some(return_type) => {
+                self.type_renderer
+                    .render_in_scope(class_path, return_type, index_tree, type_params)
+            }
         };
 
         if rendered_return.has_unknown() {
             unknown_paths.insert(
-                format!("{}.{}", class_path, function.name),
+                format!("{}.{}", class_path, method.name),
                 rendered_return.unknown,
             );
         }
 
-        let type_params_suffix = format_type_params(&function.generic_decls);
+        let type_params_suffix = format_type_params(method.type_params);
 
         let mut line = format!(
             "def {}{}({}) -> {}: ...",
-            if is_ctor { "__init__" } else { function.name },
+            emitted_name,
             type_params_suffix,
             args.join(", "),
             rendered_return.text
         );
 
+        let mut comments = Vec::new();
         if !unknown_paths.is_empty() {
-            let paths = unknown_paths.into_iter().collect::<Vec<_>>();
-            line.push_str(&format!(
-                "  # unknown type(s) used in {}",
+            let mut paths = unknown_paths.into_iter().collect::<Vec<_>>();
+            paths.sort_by(|(left, _), (right, _)| left.cmp(right));
+
+            comments.push(format!(
+                "unknown type(s) used in {}",
                 paths
                     .into_iter()
                     .map(|(k, v)| format!("{} -> [{}]", k, v.join(", ")))
                     .collect::<Box<[_]>>()
                     .join("; ")
             ));
+        }
+        if !renamed_args.is_empty() {
+            comments.push(format!("renamed arg(s) {}", renamed_args.join(", ")));
+        }
+        if !comments.is_empty() {
+            line.push_str(&format!("  # {}", comments.join("; ")));
         }
 
         self.line(line);
@@ -675,15 +597,15 @@ impl<'a> PyiEmitter<'a> {
     }
 }
 
-fn group_functions<'a>(functions: &'a [Function<'a>]) -> Vec<Vec<&'a Function<'a>>> {
-    let mut order: Vec<&'a str> = Vec::with_capacity(functions.len());
-    let mut grouped: HashMap<&'a str, Vec<&Function<'a>>> = HashMap::with_capacity(functions.len());
+fn group_methods<'a>(methods: &'a [Method<'a>]) -> Vec<Vec<&'a Method<'a>>> {
+    let mut order: Vec<&'a str> = Vec::with_capacity(methods.len());
+    let mut grouped: HashMap<&'a str, Vec<&Method<'a>>> = HashMap::with_capacity(methods.len());
 
-    for function in functions {
-        if !grouped.contains_key(function.name) {
-            order.push(function.name);
+    for method in methods {
+        if !grouped.contains_key(method.name) {
+            order.push(method.name);
         }
-        grouped.entry(function.name).or_default().push(function);
+        grouped.entry(method.name).or_default().push(method);
     }
 
     order
@@ -692,11 +614,29 @@ fn group_functions<'a>(functions: &'a [Function<'a>]) -> Vec<Vec<&'a Function<'a
         .collect()
 }
 
-fn sanitize_ident(ident: &str) -> String {
+fn sanitize_ident(ident: &str) -> Cow<'_, str> {
     if is_python_keyword(ident) {
-        format!("{}_", ident)
+        Cow::Owned(format!("{}_", ident))
+    } else if ident.contains('$') {
+        Cow::Owned(ident.replace('$', "_"))
     } else {
-        ident.to_string()
+        Cow::Borrowed(ident)
+    }
+}
+
+fn sanitize_path(path: &str) -> Cow<'_, str> {
+    if path
+        .split('.')
+        .any(|segment| matches!(sanitize_ident(segment), Cow::Owned(_)))
+    {
+        Cow::Owned(
+            path.split('.')
+                .map(sanitize_ident)
+                .collect::<Box<[_]>>()
+                .join("."),
+        )
+    } else {
+        Cow::Borrowed(path)
     }
 }
 
@@ -742,380 +682,121 @@ fn is_python_keyword(ident: &str) -> bool {
     )
 }
 
-fn collect_module_imports(
-    scopes: &[&Scope],
-    definition_paths: &DefinitionPaths,
-    exclusions: &Exclusions,
+fn collect_module_imports<'a>(
+    scopes: &[&Scope<'a>],
+    definition_paths: &DefinitionPaths<'a>,
+    exclusions: &Exclusions<'a>,
 ) -> BTreeSet<String> {
     let mut modules = BTreeSet::new();
 
-    fn add_class_module(
-        definition_paths: &DefinitionPaths,
+    fn collect_from_type<'a>(
+        r#type: &Type<'_>,
+        definition_paths: &DefinitionPaths<'a>,
         modules: &mut BTreeSet<String>,
-        class_cell: ClassRef,
-    ) {
-        if let Some(module_path) = definition_paths.class_module(class_cell)
-            && !module_path.is_empty()
-        {
-            modules.insert(module_path.to_string());
-        }
-    }
-
-    fn add_interface_module(
-        definition_paths: &DefinitionPaths,
-        modules: &mut BTreeSet<String>,
-        interface_cell: InterfaceRef,
-    ) {
-        if let Some(module_path) = definition_paths.interface_module(interface_cell)
-            && !module_path.is_empty()
-        {
-            modules.insert(module_path.to_string());
-        }
-    }
-
-    fn collect_from_generic(
-        generic: &GenericImpl<'_>,
-        definition_paths: &DefinitionPaths,
-        modules: &mut BTreeSet<String>,
-        local_index_tree: &LocalIndexTree,
-        scope: Option<ClassRef>,
+        index_tree: &GlobalIndexTree<'a>,
         type_params: &BTreeSet<String>,
     ) {
-        match generic {
-            GenericImpl::Type(r#type) => collect_from_type(
-                r#type,
+        match base_type(r#type) {
+            Type::ParameterUpperBound(bound) | Type::ParameterLowerBound(bound) => {
+                collect_from_type(bound, definition_paths, modules, index_tree, type_params);
+                return;
+            }
+            Type::Object(..) => {}
+            _ => return,
+        }
+
+        if let Some(class_cell) = resolve_type(index_tree, r#type, type_params)
+            && let Some(module_path) = definition_paths.module(class_cell)
+            && !module_path.is_empty()
+        {
+            modules.insert(module_path.to_string());
+        }
+
+        for argument in type_args(r#type) {
+            collect_from_type(argument, definition_paths, modules, index_tree, type_params);
+        }
+    }
+
+    fn collect_from_method<'a>(
+        method: &Method<'_>,
+        definition_paths: &DefinitionPaths<'a>,
+        modules: &mut BTreeSet<String>,
+        index_tree: &GlobalIndexTree<'a>,
+        type_params: &BTreeSet<String>,
+    ) {
+        if let Some(return_type) = &method.return_type {
+            collect_from_type(
+                return_type,
                 definition_paths,
                 modules,
-                local_index_tree,
-                scope,
+                index_tree,
                 type_params,
-            ),
-            GenericImpl::Wildcard(boundary) => match boundary {
-                GenericWildcardBoundary::None => {}
-                GenericWildcardBoundary::Extends(bound) | GenericWildcardBoundary::Super(bound) => {
-                    collect_from_type(
-                        bound,
-                        definition_paths,
-                        modules,
-                        local_index_tree,
-                        scope,
-                        type_params,
-                    );
-                }
-            },
-        }
-    }
-
-    fn collect_from_type(
-        r#type: &ast::QualifiedType<'_>,
-        definition_paths: &DefinitionPaths,
-        modules: &mut BTreeSet<String>,
-        local_index_tree: &LocalIndexTree,
-        scope: Option<ClassRef>,
-        type_params: &BTreeSet<String>,
-    ) {
-        match resolve_type(local_index_tree, scope, r#type, type_params) {
-            Some(ResolvedType::Class(class_cell)) => {
-                add_class_module(definition_paths, modules, class_cell);
-            }
-            Some(ResolvedType::Interface(interface_cell)) => {
-                add_interface_module(definition_paths, modules, interface_cell);
-            }
-            _ => {}
+            );
         }
 
-        for part in r#type {
-            if let Some((_, generic_impls)) = named_type(part) {
-                for generic in generic_impls {
-                    collect_from_generic(
-                        generic,
-                        definition_paths,
-                        modules,
-                        local_index_tree,
-                        scope,
-                        type_params,
-                    );
-                }
-            }
-        }
-    }
-
-    fn collect_from_function(
-        function: &Function<'_>,
-        definition_paths: &DefinitionPaths,
-        modules: &mut BTreeSet<String>,
-        local_index_tree: &LocalIndexTree,
-        scope: Option<ClassRef>,
-        type_params: &BTreeSet<String>,
-    ) {
-        collect_from_type(
-            &function.return_type,
-            definition_paths,
-            modules,
-            local_index_tree,
-            scope,
-            type_params,
-        );
-        for argument in &function.args {
+        for argument in method.args {
             collect_from_type(
                 &argument.r#type,
                 definition_paths,
                 modules,
-                local_index_tree,
-                scope,
+                index_tree,
                 type_params,
             );
         }
     }
 
-    fn collect_from_class(
-        class_cell: ClassRef,
-        definition_paths: &DefinitionPaths,
+    fn collect_from_class<'a>(
+        class_cell: ClassRef<'a>,
+        definition_paths: &DefinitionPaths<'a>,
         modules: &mut BTreeSet<String>,
-        local_index_tree: &LocalIndexTree,
+        index_tree: &GlobalIndexTree<'a>,
         outer_type_params: &BTreeSet<String>,
-        exclusions: &Exclusions,
+        exclusions: &Exclusions<'a>,
     ) {
-        if exclusions.contains(TypeRef::Class(class_cell)) {
+        if exclusions.contains(class_cell) {
             return;
         }
-        let class = class_cell.borrow();
-        let class_type_params = extend_type_params(outer_type_params, &class.generic_decls);
+        let class = &*class_cell;
+        let class_type_params = extend_type_params(outer_type_params, class.type_params);
 
-        if let Some(extend) = &class.extend {
+        for supertype in base_types(class) {
             collect_from_type(
-                extend,
+                supertype,
                 definition_paths,
                 modules,
-                local_index_tree,
-                Some(class_cell),
-                &class_type_params,
-            );
-        }
-        for implemented in &class.implements {
-            collect_from_type(
-                implemented,
-                definition_paths,
-                modules,
-                local_index_tree,
-                Some(class_cell),
+                index_tree,
                 &class_type_params,
             );
         }
 
-        for field in &class.fields {
+        for field in class.fields {
             collect_from_type(
                 &field.r#type,
                 definition_paths,
                 modules,
-                local_index_tree,
-                Some(class_cell),
+                index_tree,
                 &class_type_params,
             );
         }
 
-        for function in &class.functions {
-            let function_type_params =
-                extend_type_params(&class_type_params, &function.generic_decls);
-            collect_from_function(
-                function,
+        for method in class.methods {
+            let method_type_params = extend_type_params(&class_type_params, method.type_params);
+            collect_from_method(
+                method,
                 definition_paths,
                 modules,
-                local_index_tree,
-                Some(class_cell),
-                &function_type_params,
+                index_tree,
+                &method_type_params,
             );
         }
 
-        for nested in class.classes.iter().map(ClassRef::new) {
+        for child in class.children.iter().map(ClassRef::new) {
             collect_from_class(
-                nested,
+                child,
                 definition_paths,
                 modules,
-                local_index_tree,
+                index_tree,
                 &class_type_params,
-                exclusions,
-            );
-        }
-        for nested in class.interfaces.iter().map(InterfaceRef::new) {
-            collect_from_interface(
-                nested,
-                definition_paths,
-                modules,
-                local_index_tree,
-                &class_type_params,
-                exclusions,
-            );
-        }
-        for nested in class.enums.iter().map(EnumRef::new) {
-            collect_from_enum(
-                nested,
-                definition_paths,
-                modules,
-                local_index_tree,
-                &class_type_params,
-                exclusions,
-            );
-        }
-    }
-
-    fn collect_from_interface(
-        interface_cell: InterfaceRef,
-        definition_paths: &DefinitionPaths,
-        modules: &mut BTreeSet<String>,
-        local_index_tree: &LocalIndexTree,
-        outer_type_params: &BTreeSet<String>,
-        exclusions: &Exclusions,
-    ) {
-        if exclusions.contains(TypeRef::Interface(interface_cell)) {
-            return;
-        }
-        let interface = interface_cell.borrow();
-        let interface_type_params = extend_type_params(outer_type_params, &interface.generic_decls);
-
-        for extend in &interface.extends {
-            collect_from_type(
-                extend,
-                definition_paths,
-                modules,
-                local_index_tree,
-                None,
-                &interface_type_params,
-            );
-        }
-
-        for field in &interface.fields {
-            collect_from_type(
-                &field.r#type,
-                definition_paths,
-                modules,
-                local_index_tree,
-                None,
-                &interface_type_params,
-            );
-        }
-
-        for function in &interface.functions {
-            let function_type_params =
-                extend_type_params(&interface_type_params, &function.generic_decls);
-            collect_from_function(
-                function,
-                definition_paths,
-                modules,
-                local_index_tree,
-                None,
-                &function_type_params,
-            );
-        }
-
-        for nested in interface.classes.iter().map(ClassRef::new) {
-            collect_from_class(
-                nested,
-                definition_paths,
-                modules,
-                local_index_tree,
-                &interface_type_params,
-                exclusions,
-            );
-        }
-        for nested in interface.interfaces.iter().map(InterfaceRef::new) {
-            collect_from_interface(
-                nested,
-                definition_paths,
-                modules,
-                local_index_tree,
-                &interface_type_params,
-                exclusions,
-            );
-        }
-        for nested in interface.enums.iter().map(EnumRef::new) {
-            collect_from_enum(
-                nested,
-                definition_paths,
-                modules,
-                local_index_tree,
-                &interface_type_params,
-                exclusions,
-            );
-        }
-    }
-
-    fn collect_from_enum(
-        enum_cell: EnumRef,
-        definition_paths: &DefinitionPaths,
-        modules: &mut BTreeSet<String>,
-        local_index_tree: &LocalIndexTree,
-        outer_type_params: &BTreeSet<String>,
-        exclusions: &Exclusions,
-    ) {
-        if exclusions.contains(TypeRef::Enum(enum_cell)) {
-            return;
-        }
-        let r#enum = enum_cell.borrow();
-        let enum_type_params = extend_type_params(outer_type_params, &r#enum.generic_decls);
-
-        for implemented in &r#enum.implements {
-            collect_from_type(
-                implemented,
-                definition_paths,
-                modules,
-                local_index_tree,
-                None,
-                &enum_type_params,
-            );
-        }
-
-        for field in &r#enum.fields {
-            collect_from_type(
-                &field.r#type,
-                definition_paths,
-                modules,
-                local_index_tree,
-                None,
-                &enum_type_params,
-            );
-        }
-
-        for function in &r#enum.functions {
-            let function_type_params =
-                extend_type_params(&enum_type_params, &function.generic_decls);
-            collect_from_function(
-                function,
-                definition_paths,
-                modules,
-                local_index_tree,
-                None,
-                &function_type_params,
-            );
-        }
-
-        for nested in r#enum.classes.iter().map(ClassRef::new) {
-            collect_from_class(
-                nested,
-                definition_paths,
-                modules,
-                local_index_tree,
-                &enum_type_params,
-                exclusions,
-            );
-        }
-        for nested in r#enum.interfaces.iter().map(InterfaceRef::new) {
-            collect_from_interface(
-                nested,
-                definition_paths,
-                modules,
-                local_index_tree,
-                &enum_type_params,
-                exclusions,
-            );
-        }
-        for nested in r#enum.enums.iter().map(EnumRef::new) {
-            collect_from_enum(
-                nested,
-                definition_paths,
-                modules,
-                local_index_tree,
-                &enum_type_params,
                 exclusions,
             );
         }
@@ -1123,33 +804,12 @@ fn collect_module_imports(
 
     let empty_type_params = BTreeSet::new();
     for scope in scopes {
-        let ast = scope.ast.ast();
-        for class_cell in ast.classes.iter().map(ClassRef::new) {
+        for class_cell in scope.root.ir().classes.iter().map(ClassRef::new) {
             collect_from_class(
                 class_cell,
                 definition_paths,
                 &mut modules,
-                &scope.local_index_tree,
-                &empty_type_params,
-                exclusions,
-            );
-        }
-        for interface_cell in ast.interfaces.iter().map(InterfaceRef::new) {
-            collect_from_interface(
-                interface_cell,
-                definition_paths,
-                &mut modules,
-                &scope.local_index_tree,
-                &empty_type_params,
-                exclusions,
-            );
-        }
-        for enum_cell in ast.enums.iter().map(EnumRef::new) {
-            collect_from_enum(
-                enum_cell,
-                definition_paths,
-                &mut modules,
-                &scope.local_index_tree,
+                &scope.index_tree,
                 &empty_type_params,
                 exclusions,
             );
@@ -1164,25 +824,25 @@ struct RenderedBases {
     unknown: Box<[String]>,
 }
 
-fn generic_ident_or_any(generics: &[ast::GenericDecl<'_>], index: usize) -> String {
-    generics
+fn generic_ident_or_any(type_params: &[TypeParameter<'_>], index: usize) -> String {
+    type_params
         .get(index)
-        .map(|generic| generic.name.to_string())
+        .map(|param| sanitize_ident(param.name).into_owned())
         .unwrap_or_else(|| "Any".to_string())
 }
 
 fn java_stdlib_python_base(
     definition_path: &str,
-    generics: &[ast::GenericDecl<'_>],
+    type_params: &[TypeParameter<'_>],
 ) -> Option<String> {
     match definition_path {
         "java.util.Map" => {
-            let key = generic_ident_or_any(generics, 0);
-            let value = generic_ident_or_any(generics, 1);
+            let key = generic_ident_or_any(type_params, 0);
+            let value = generic_ident_or_any(type_params, 1);
             Some(format!("dict[{}, {}]", key, value))
         }
-        "java.util.List" => Some(format!("list[{}]", generic_ident_or_any(generics, 0))),
-        "java.util.Set" => Some(format!("set[{}]", generic_ident_or_any(generics, 0))),
+        "java.util.List" => Some(format!("list[{}]", generic_ident_or_any(type_params, 0))),
+        "java.util.Set" => Some(format!("set[{}]", generic_ident_or_any(type_params, 0))),
         "java.lang.Boolean" => Some("bool".to_string()),
         "java.lang.Integer" | "java.lang.Byte" | "java.lang.Long" | "java.lang.Short" => {
             Some("int".to_string())
@@ -1193,33 +853,37 @@ fn java_stdlib_python_base(
     }
 }
 
-fn collect_class_base_types(
-    class: &ast::Class<'_>,
-    type_renderer: &TypeRenderer,
-    local_index_tree: &LocalIndexTree,
-    class_cell: ClassRef,
+fn base_types<'a>(class: &'a ir::Class<'a>) -> impl Iterator<Item = &'a Type<'a>> {
+    let extends = match class.r#type {
+        ClassType::Class => class.extends.as_ref(),
+        ClassType::Interface | ClassType::Enum => None,
+    };
+
+    extends.into_iter().chain(class.implements)
+}
+
+fn collect_base_types<'a>(
+    class: &ir::Class<'_>,
+    type_renderer: &TypeRenderer<'a, '_>,
+    index_tree: &GlobalIndexTree<'a>,
     type_params: &BTreeSet<String>,
 ) -> RenderedBases {
-    let mut bases =
-        Vec::with_capacity(class.implements.len() + usize::from(class.extend.is_some()));
+    let mut bases = Vec::with_capacity(class.implements.len() + 1);
     let mut unknown = Vec::new();
 
-    if let Some(extend) = &class.extend {
-        let rendered =
-            type_renderer.render(extend, local_index_tree, Some(class_cell), type_params);
+    let mut is_first_supertype = class.r#type == ClassType::Class && class.extends.is_some();
+
+    for supertype in base_types(class) {
+        let rendered = type_renderer.render(supertype, index_tree, type_params);
         unknown.extend(rendered.unknown);
-        if unknown.is_empty() {
-            bases.push(rendered.text);
-        } else {
+
+        if is_first_supertype && !unknown.is_empty() {
             bases.push("java.lang.Object".to_string());
+        } else {
+            bases.push(rendered.text);
         }
-    }
 
-    for implemented in &class.implements {
-        let rendered =
-            type_renderer.render(implemented, local_index_tree, Some(class_cell), type_params);
-        unknown.extend(rendered.unknown);
-        bases.push(rendered.text);
+        is_first_supertype = false;
     }
 
     RenderedBases {
@@ -1228,75 +892,156 @@ fn collect_class_base_types(
     }
 }
 
-fn collect_interface_base_types(
-    interface: &ast::Interface<'_>,
-    type_renderer: &TypeRenderer,
-    local_index_tree: &LocalIndexTree,
-    type_params: &BTreeSet<String>,
-) -> RenderedBases {
-    let mut bases = Vec::with_capacity(interface.extends.len());
-    let mut unknown = Vec::new();
-
-    for extend in &interface.extends {
-        let rendered = type_renderer.render(extend, local_index_tree, None, type_params);
-        unknown.extend(rendered.unknown);
-        bases.push(rendered.text);
+fn uses_deprecated<'a>(
+    class_cell: ClassRef<'a>,
+    exclusions: &Exclusions<'a>,
+    nested: bool,
+) -> bool {
+    if exclusions.contains(class_cell) {
+        return false;
     }
 
-    RenderedBases {
-        bases,
-        unknown: unknown.into_boxed_slice(),
+    if class_cell.anonymous.is_some() {
+        return true;
+    }
+
+    if nested && class_cell.modifiers.contains(Modifiers::PRIVATE) {
+        return true;
+    }
+
+    if sanitize_ident(class_cell.name) != class_cell.name {
+        return true;
+    }
+
+    class_cell.methods.iter().any(|method| {
+        method.modifiers.contains(Modifiers::PRIVATE) || sanitize_ident(method.name) != method.name
+    }) || class_cell
+        .children
+        .iter()
+        .map(ClassRef::new)
+        .any(|child| uses_deprecated(child, exclusions, true))
+}
+
+fn declared_type_params<'a>(
+    class: &ir::Class<'a>,
+    scope_params: &[TypeParameter<'a>],
+) -> Cow<'a, [TypeParameter<'a>]> {
+    if class.anonymous.is_none() || scope_params.is_empty() {
+        return Cow::Borrowed(class.type_params);
+    }
+
+    let mut referenced = BTreeSet::new();
+    collect_param_refs(class, &mut referenced);
+
+    Cow::Owned(
+        scope_params
+            .iter()
+            .filter(|param| {
+                referenced.contains(param.name)
+                    && !class.type_params.iter().any(|own| own.name == param.name)
+            })
+            .chain(class.type_params)
+            .copied()
+            .collect(),
+    )
+}
+
+fn collect_param_refs<'a>(class: &ir::Class<'a>, into: &mut BTreeSet<&'a str>) {
+    let extends = match class.r#type {
+        ClassType::Class => class.extends.as_ref(),
+        ClassType::Interface | ClassType::Enum => None,
+    };
+
+    for supertype in extends.into_iter().chain(class.implements) {
+        collect_type_param_refs(supertype, into);
+    }
+
+    for field in class.fields {
+        collect_type_param_refs(&field.r#type, into);
+    }
+
+    for method in class.methods {
+        let mut refs = BTreeSet::new();
+
+        if let Some(return_type) = &method.return_type {
+            collect_type_param_refs(return_type, &mut refs);
+        }
+        for argument in method.args {
+            collect_type_param_refs(&argument.r#type, &mut refs);
+        }
+
+        extend_unshadowed(into, refs, method.type_params);
+    }
+
+    for child in class.children {
+        if child.anonymous.is_some() {
+            continue;
+        }
+
+        let mut refs = BTreeSet::new();
+        collect_param_refs(child, &mut refs);
+
+        extend_unshadowed(into, refs, child.type_params);
     }
 }
 
-fn collect_enum_base_types(
-    r#enum: &ast::Enum<'_>,
-    type_renderer: &TypeRenderer,
-    local_index_tree: &LocalIndexTree,
-    type_params: &BTreeSet<String>,
-) -> RenderedBases {
-    let mut bases = Vec::with_capacity(r#enum.implements.len());
-    let mut unknown = Vec::new();
+fn extend_unshadowed<'a>(
+    into: &mut BTreeSet<&'a str>,
+    refs: BTreeSet<&'a str>,
+    shadowing: &[TypeParameter<'_>],
+) {
+    into.extend(
+        refs.into_iter()
+            .filter(|name| !shadowing.iter().any(|param| param.name == *name)),
+    );
+}
 
-    for implemented in &r#enum.implements {
-        let rendered = type_renderer.render(implemented, local_index_tree, None, type_params);
-        unknown.extend(rendered.unknown);
-        bases.push(rendered.text);
-    }
-
-    RenderedBases {
-        bases,
-        unknown: unknown.into_boxed_slice(),
+fn collect_type_param_refs<'a>(r#type: &Type<'a>, into: &mut BTreeSet<&'a str>) {
+    match r#type {
+        Type::ParameterRef(name) => {
+            into.insert(name);
+        }
+        Type::Array(inner)
+        | Type::ParameterUpperBound(inner)
+        | Type::ParameterLowerBound(inner) => collect_type_param_refs(inner, into),
+        Type::Object(_, parts) => {
+            for part in *parts {
+                for argument in part.type_args {
+                    collect_type_param_refs(argument, into);
+                }
+            }
+        }
+        _ => {}
     }
 }
 
 fn extend_type_params(
     base: &BTreeSet<String>,
-    generics: &[ast::GenericDecl<'_>],
+    type_params: &[TypeParameter<'_>],
 ) -> BTreeSet<String> {
     let mut combined = base.clone();
-    for generic in generics {
-        combined.insert(generic.name.to_string());
+    for param in type_params {
+        combined.insert(param.name.to_string());
     }
     combined
 }
 
-fn format_type_params(generics: &[ast::GenericDecl<'_>]) -> String {
-    if generics.is_empty() {
+fn format_type_params(type_params: &[TypeParameter<'_>]) -> String {
+    if type_params.is_empty() {
         return String::new();
     }
 
-    let params = generics
+    let params = type_params
         .iter()
-        .map(|generic| generic.name.to_string())
+        .map(|param| sanitize_ident(param.name))
         .collect::<Vec<_>>()
         .join(", ");
     format!("[{}]", params)
 }
 
-struct TypeRenderer<'a> {
-    definition_paths: Arc<DefinitionPaths>,
-    mixer: &'a Mixer,
+struct TypeRenderer<'a, 'm> {
+    definition_paths: Arc<DefinitionPaths<'a>>,
+    mixer: &'m Mixer,
 }
 
 struct RenderedType {
@@ -1312,10 +1057,10 @@ impl RenderedType {
         }
     }
 
-    fn unknown(qty: &ast::QualifiedType<'_>) -> Self {
+    fn unknown(ty: &Type<'_>) -> Self {
         Self {
             text: "Any".to_string(),
-            unknown: Box::from([qty.fmt()]),
+            unknown: Box::from([ty.to_string()]),
         }
     }
 
@@ -1324,100 +1069,102 @@ impl RenderedType {
     }
 }
 
-fn resolve_type(
-    local_index_tree: &LocalIndexTree,
-    scope: Option<ClassRef>,
-    qty: &ast::QualifiedType<'_>,
+fn resolve_type<'a>(
+    index_tree: &GlobalIndexTree<'a>,
+    ty: &Type<'_>,
     type_params: &BTreeSet<String>,
-) -> Option<ResolvedType> {
-    if qty.len() == 1
-        && let Some((ident, _)) = qty.last().and_then(named_type)
-        && type_params.contains(ident)
+) -> Option<ClassRef<'a>> {
+    if let Some((packages, parts)) = object_parts(ty)
+        && packages.is_empty()
+        && parts.len() == 1
+        && type_params.contains(parts[0].ident)
     {
         return None;
     }
 
-    local_index_tree.search(scope, qty)
+    index_tree.search(ty)
 }
 
-impl<'a> TypeRenderer<'a> {
-    fn new(definition_paths: Arc<DefinitionPaths>, mixer: &'a Mixer) -> Self {
+impl<'a, 'm> TypeRenderer<'a, 'm> {
+    fn new(definition_paths: Arc<DefinitionPaths<'a>>, mixer: &'m Mixer) -> Self {
         Self {
             definition_paths,
             mixer,
         }
     }
 
-    fn render_generic(
-        &self,
-        ty_gen: &GenericImpl<'_>,
-        local_index_tree: &LocalIndexTree,
-        scope: Option<ClassRef>,
-        type_params: &BTreeSet<String>,
-    ) -> RenderedType {
-        match &ty_gen {
-            GenericImpl::Type(ty) => self.render(ty, local_index_tree, scope, type_params),
-            GenericImpl::Wildcard(boundary) => match boundary {
-                GenericWildcardBoundary::None => RenderedType::known("Any".to_string()),
-                GenericWildcardBoundary::Extends(bound) | GenericWildcardBoundary::Super(bound) => {
-                    let rendered = self.render(bound, local_index_tree, scope, type_params);
-                    RenderedType {
-                        text: "Any".to_string(),
-                        unknown: rendered.unknown,
-                    }
-                }
-            },
-        }
-    }
-
     fn render(
         &self,
-        qty: &ast::QualifiedType<'_>,
-        local_index_tree: &LocalIndexTree,
-        scope: Option<ClassRef>,
+        ty: &Type<'_>,
+        index_tree: &GlobalIndexTree,
         type_params: &BTreeSet<String>,
     ) -> RenderedType {
-        let Some(last) = qty.last() else {
-            return RenderedType::unknown(qty);
-        };
+        let mut rendered = self.render_base(ty, index_tree, type_params);
 
-        let mut rendered = self.render_type(qty, local_index_tree, scope, type_params);
-        let depth = array_depth(last);
-        if depth > 0 {
-            for _ in 0..depth {
-                rendered.text = format!("list[{}]", rendered.text);
-            }
+        for _ in 0..array_depth(ty) {
+            rendered.text = format!("list[{}]", rendered.text);
         }
 
         rendered
     }
 
+    fn render_base(
+        &self,
+        ty: &Type<'_>,
+        index_tree: &GlobalIndexTree,
+        type_params: &BTreeSet<String>,
+    ) -> RenderedType {
+        match base_type(ty) {
+            Type::ParameterUnbound => RenderedType::known("Any".to_string()),
+            Type::ParameterUpperBound(bound) | Type::ParameterLowerBound(bound) => {
+                let rendered = self.render(bound, index_tree, type_params);
+                RenderedType {
+                    text: "Any".to_string(),
+                    unknown: rendered.unknown,
+                }
+            }
+            Type::ParameterRef(name) if type_params.contains(*name) => {
+                RenderedType::known(sanitize_ident(name).into_owned())
+            }
+            object @ Type::Object(..) => match resolve_type(index_tree, object, type_params) {
+                Some(class_cell) => self.render_named_type(
+                    self.definition_paths.path(&class_cell),
+                    type_args(object),
+                    index_tree,
+                    type_params,
+                ),
+                None => RenderedType::unknown(object),
+            },
+            unresolved @ Type::ParameterRef(_) => RenderedType::unknown(unresolved),
+            primitive => RenderedType::known(
+                primitive_python_type(primitive)
+                    .unwrap_or("Any")
+                    .to_string(),
+            ),
+        }
+    }
+
     fn render_in_scope(
         &self,
         scope_path: &str,
-        qty: &ast::QualifiedType<'_>,
-        local_index_tree: &LocalIndexTree,
-        scope: Option<ClassRef>,
+        ty: &Type<'_>,
+        index_tree: &GlobalIndexTree,
         type_params: &BTreeSet<String>,
     ) -> RenderedType {
-        let rendered = self.render(qty, local_index_tree, scope, type_params);
+        let rendered = self.render(ty, index_tree, type_params);
         if !rendered.has_unknown() {
             return rendered;
         }
 
-        let Some(ty) = qty.last() else {
+        let Some((packages, parts)) = object_parts(ty) else {
             return rendered;
         };
 
-        let Some((ident, generics)) = named_type(ty) else {
-            return rendered;
-        };
-
-        if qty.len() != 1 || type_params.contains(ident) {
+        if !packages.is_empty() || parts.len() != 1 || type_params.contains(parts[0].ident) {
             return rendered;
         }
 
-        let candidate = format!("{}.{}", scope_path, ident);
+        let candidate = format!("{}.{}", scope_path, parts[0].ident);
         if !self
             .definition_paths
             .known_paths
@@ -1426,13 +1173,9 @@ impl<'a> TypeRenderer<'a> {
             return rendered;
         }
 
-        let mut nested =
-            self.render_named_type(candidate, generics, local_index_tree, scope, type_params);
-        let depth = array_depth(ty);
-        if depth > 0 {
-            for _ in 0..depth {
-                nested.text = format!("list[{}]", nested.text);
-            }
+        let mut nested = self.render_named_type(candidate, type_args(ty), index_tree, type_params);
+        for _ in 0..array_depth(ty) {
+            nested.text = format!("list[{}]", nested.text);
         }
 
         nested
@@ -1441,94 +1184,41 @@ impl<'a> TypeRenderer<'a> {
     fn render_constructor_return(
         &self,
         class_path: &str,
-        qty: &ast::QualifiedType<'_>,
-        local_index_tree: &LocalIndexTree,
-        scope: Option<ClassRef>,
+        ty: &Type<'_>,
+        index_tree: &GlobalIndexTree,
         type_params: &BTreeSet<String>,
     ) -> RenderedType {
-        let Some(last) = qty.last() else {
-            return RenderedType::known(class_path.to_string());
-        };
-
-        let generics = named_type(last)
-            .map(|(_, generics)| generics)
-            .unwrap_or(&[]);
         let mut rendered = self.render_named_type(
             class_path.to_string(),
-            generics,
-            local_index_tree,
-            scope,
+            type_args(ty),
+            index_tree,
             type_params,
         );
-        let depth = array_depth(last);
-        if depth > 0 {
-            for _ in 0..depth {
-                rendered.text = format!("list[{}]", rendered.text);
-            }
+
+        for _ in 0..array_depth(ty) {
+            rendered.text = format!("list[{}]", rendered.text);
         }
 
         rendered
     }
 
-    fn render_type(
-        &self,
-        qty: &ast::QualifiedType<'_>,
-        local_index_tree: &LocalIndexTree,
-        scope: Option<ClassRef>,
-        type_params: &BTreeSet<String>,
-    ) -> RenderedType {
-        let ty = qty.last().unwrap();
-
-        let Some((ident, generic_impls)) = named_type(ty) else {
-            return RenderedType::known(primitive_python_type(ty).unwrap_or("Any").to_string());
-        };
-
-        match resolve_type(local_index_tree, scope, qty, type_params) {
-            Some(ResolvedType::Class(class_cell)) => {
-                let name = self
-                    .definition_paths
-                    .class_paths
-                    .get(&class_cell)
-                    .map(|path| path.to_string())
-                    .unwrap_or_else(|| class_cell.ident().to_string());
-                self.render_named_type(name, generic_impls, local_index_tree, scope, type_params)
-            }
-            Some(ResolvedType::Interface(interface_cell)) => {
-                let name = self
-                    .definition_paths
-                    .interface_paths
-                    .get(&interface_cell)
-                    .map(|path| path.to_string())
-                    .unwrap_or_else(|| interface_cell.ident().to_string());
-                self.render_named_type(name, generic_impls, local_index_tree, scope, type_params)
-            }
-            None if type_params.contains(ident) => self.render_named_type(
-                ident.to_string(),
-                generic_impls,
-                local_index_tree,
-                scope,
-                type_params,
-            ),
-            None => RenderedType::unknown(qty),
-        }
-    }
-
     fn render_named_type(
         &self,
         base: String,
-        generics: &[GenericImpl<'_>],
-        local_index_tree: &LocalIndexTree,
-        scope: Option<ClassRef>,
+        arguments: &[Type<'_>],
+        index_tree: &GlobalIndexTree,
         type_params: &BTreeSet<String>,
     ) -> RenderedType {
-        if generics.is_empty() {
+        let base = sanitize_path(&base);
+
+        if arguments.is_empty() {
             return RenderedType::known(self.mixer.try_mix(&base));
         }
 
         let mut unknown = Vec::new();
-        let mut args = Vec::with_capacity(generics.len());
-        for arg in generics {
-            let rendered = self.render_generic(arg, local_index_tree, scope, type_params);
+        let mut args = Vec::with_capacity(arguments.len());
+        for argument in arguments {
+            let rendered = self.render(argument, index_tree, type_params);
             unknown.extend(rendered.unknown);
             args.push(rendered.text);
         }
@@ -1543,177 +1233,49 @@ impl<'a> TypeRenderer<'a> {
 
 fn collect_definition_paths<'a>(
     roots: impl IntoIterator<Item = &'a Root>,
-    exclusions: &Exclusions,
-) -> DefinitionPaths {
+    exclusions: &Exclusions<'a>,
+) -> DefinitionPaths<'a> {
     let mut paths = DefinitionPaths {
-        class_paths: HashMap::new(),
-        class_modules: HashMap::new(),
-        enum_paths: HashMap::new(),
-        interface_paths: HashMap::new(),
-        interface_modules: HashMap::new(),
+        paths: HashMap::new(),
+        modules: HashMap::new(),
         known_paths: HashSet::new(),
     };
 
-    fn walk_class(
-        paths: &mut DefinitionPaths,
-        class_cell: ClassRef,
+    fn walk_class<'a>(
+        paths: &mut DefinitionPaths<'a>,
+        class_cell: ClassRef<'a>,
         parent_path: Option<&str>,
         module_path: Option<&Arc<str>>,
-        exclusions: &Exclusions,
+        exclusions: &Exclusions<'a>,
     ) {
-        if exclusions.contains(TypeRef::Class(class_cell)) {
+        if exclusions.contains(class_cell) {
             return;
         }
-        let class = class_cell.borrow();
-        let class_path: Arc<str> = if let Some(parent_path) = parent_path {
-            format!("{}.{}", parent_path, class.name)
-        } else {
-            class.name.to_string()
+        let class = &*class_cell;
+        let class_path: Arc<str> = match (class.anonymous.is_some(), parent_path) {
+            (true, _) => match module_path {
+                Some(module) if !module.is_empty() => format!("{}.{}", module, class.name),
+                _ => class.name.to_string(),
+            },
+            (false, Some(parent_path)) => format!("{}.{}", parent_path, class.name),
+            (false, None) => class.name.to_string(),
         }
         .into();
 
-        paths.class_paths.insert(class_cell, class_path.clone());
+        paths.paths.insert(class_cell, class_path.clone());
         paths.known_paths.insert(class_path.clone());
 
         if let Some(module_path) = module_path
             && !module_path.as_ref().is_empty()
         {
-            paths.class_modules.insert(class_cell, module_path.clone());
+            paths.modules.insert(class_cell, module_path.clone());
         }
 
-        for nested in class.classes.iter().map(ClassRef::new) {
+        for child in class.children.iter().map(ClassRef::new) {
             walk_class(
                 paths,
-                nested,
+                child,
                 Some(class_path.as_ref()),
-                module_path,
-                exclusions,
-            );
-        }
-        for nested in class.interfaces.iter().map(InterfaceRef::new) {
-            walk_interface(
-                paths,
-                nested,
-                Some(class_path.as_ref()),
-                module_path,
-                exclusions,
-            );
-        }
-        for nested in class.enums.iter().map(EnumRef::new) {
-            walk_enum(
-                paths,
-                nested,
-                Some(class_path.as_ref()),
-                module_path,
-                exclusions,
-            );
-        }
-    }
-
-    fn walk_interface(
-        paths: &mut DefinitionPaths,
-        interface_cell: InterfaceRef,
-        parent_path: Option<&str>,
-        module_path: Option<&Arc<str>>,
-        exclusions: &Exclusions,
-    ) {
-        if exclusions.contains(TypeRef::Interface(interface_cell)) {
-            return;
-        }
-        let interface = interface_cell.borrow();
-        let interface_path: Arc<str> = if let Some(parent_path) = parent_path {
-            format!("{}.{}", parent_path, interface.name)
-        } else {
-            interface.name.to_string()
-        }
-        .into();
-
-        paths
-            .interface_paths
-            .insert(interface_cell, interface_path.clone());
-        paths.known_paths.insert(interface_path.clone());
-
-        if let Some(module_path) = module_path
-            && !module_path.as_ref().is_empty()
-        {
-            paths
-                .interface_modules
-                .insert(interface_cell, module_path.clone());
-        }
-
-        for nested in interface.classes.iter().map(ClassRef::new) {
-            walk_class(
-                paths,
-                nested,
-                Some(interface_path.as_ref()),
-                module_path,
-                exclusions,
-            );
-        }
-        for nested in interface.interfaces.iter().map(InterfaceRef::new) {
-            walk_interface(
-                paths,
-                nested,
-                Some(interface_path.as_ref()),
-                module_path,
-                exclusions,
-            );
-        }
-        for nested in interface.enums.iter().map(EnumRef::new) {
-            walk_enum(
-                paths,
-                nested,
-                Some(interface_path.as_ref()),
-                module_path,
-                exclusions,
-            );
-        }
-    }
-
-    fn walk_enum(
-        paths: &mut DefinitionPaths,
-        enum_cell: EnumRef,
-        parent_path: Option<&str>,
-        module_path: Option<&Arc<str>>,
-        exclusions: &Exclusions,
-    ) {
-        if exclusions.contains(TypeRef::Enum(enum_cell)) {
-            return;
-        }
-        let r#enum = enum_cell.borrow();
-        let enum_path: Arc<str> = if let Some(parent_path) = parent_path {
-            format!("{}.{}", parent_path, r#enum.name)
-        } else {
-            r#enum.name.to_string()
-        }
-        .into();
-
-        paths.enum_paths.insert(enum_cell, enum_path.clone());
-        paths.known_paths.insert(enum_path.clone());
-
-        for nested in r#enum.classes.iter().map(ClassRef::new) {
-            walk_class(
-                paths,
-                nested,
-                Some(enum_path.as_ref()),
-                module_path,
-                exclusions,
-            );
-        }
-        for nested in r#enum.interfaces.iter().map(InterfaceRef::new) {
-            walk_interface(
-                paths,
-                nested,
-                Some(enum_path.as_ref()),
-                module_path,
-                exclusions,
-            );
-        }
-        for nested in r#enum.enums.iter().map(EnumRef::new) {
-            walk_enum(
-                paths,
-                nested,
-                Some(enum_path.as_ref()),
                 module_path,
                 exclusions,
             );
@@ -1721,36 +1283,18 @@ fn collect_definition_paths<'a>(
     }
 
     for root in roots {
-        let ast = root.ast();
-        let module_path: Option<Arc<str>> = if ast.package.trim().trim_matches('.').is_empty() {
+        let ir = root.ir();
+        let module_path: Option<Arc<str>> = if ir.package.trim().trim_matches('.').is_empty() {
             None
         } else {
-            Some(Arc::from(ast.package.trim().trim_matches('.')))
+            Some(Arc::from(ir.package.trim().trim_matches('.')))
         };
         let package_prefix = module_path.as_deref();
 
-        for class_cell in ast.classes.iter().map(ClassRef::new) {
+        for class_cell in ir.classes.iter().map(ClassRef::new) {
             walk_class(
                 &mut paths,
                 class_cell,
-                package_prefix,
-                module_path.as_ref(),
-                exclusions,
-            );
-        }
-        for interface_cell in ast.interfaces.iter().map(InterfaceRef::new) {
-            walk_interface(
-                &mut paths,
-                interface_cell,
-                package_prefix,
-                module_path.as_ref(),
-                exclusions,
-            );
-        }
-        for enum_cell in ast.enums.iter().map(EnumRef::new) {
-            walk_enum(
-                &mut paths,
-                enum_cell,
                 package_prefix,
                 module_path.as_ref(),
                 exclusions,
@@ -1762,46 +1306,21 @@ fn collect_definition_paths<'a>(
 }
 
 #[derive(Debug, Clone)]
-struct DefinitionPaths {
-    class_paths: HashMap<ClassRef, Arc<str>>,
-    class_modules: HashMap<ClassRef, Arc<str>>,
-    enum_paths: HashMap<EnumRef, Arc<str>>,
-    interface_paths: HashMap<InterfaceRef, Arc<str>>,
-    interface_modules: HashMap<InterfaceRef, Arc<str>>,
+struct DefinitionPaths<'a> {
+    paths: HashMap<ClassRef<'a>, Arc<str>>,
+    modules: HashMap<ClassRef<'a>, Arc<str>>,
     known_paths: HashSet<Arc<str>>,
 }
 
-impl DefinitionPaths {
-    fn class_path(&self, class_cell: &ClassRef) -> String {
-        self.class_paths
+impl<'a> DefinitionPaths<'a> {
+    fn path(&self, class_cell: &ClassRef<'a>) -> String {
+        self.paths
             .get(class_cell)
             .map(|path| path.to_string())
-            .unwrap_or_else(|| class_cell.ident().to_string())
+            .unwrap_or_else(|| class_cell.name.to_string())
     }
 
-    fn class_module(&self, class_cell: ClassRef) -> Option<&str> {
-        self.class_modules
-            .get(&class_cell)
-            .map(|module| module.as_ref())
-    }
-
-    fn interface_module(&self, interface_cell: InterfaceRef) -> Option<&str> {
-        self.interface_modules
-            .get(&interface_cell)
-            .map(|module| module.as_ref())
-    }
-
-    fn enum_path(&self, enum_cell: &EnumRef) -> String {
-        self.enum_paths
-            .get(enum_cell)
-            .map(|path| path.to_string())
-            .unwrap_or_else(|| enum_cell.ident().to_string())
-    }
-
-    fn interface_path(&self, interface_cell: &InterfaceRef) -> String {
-        self.interface_paths
-            .get(interface_cell)
-            .map(|path| path.to_string())
-            .unwrap_or_else(|| interface_cell.ident().to_string())
+    fn module(&self, class_cell: ClassRef<'a>) -> Option<&str> {
+        self.modules.get(&class_cell).map(|module| module.as_ref())
     }
 }
