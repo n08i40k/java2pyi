@@ -279,7 +279,7 @@ impl<'a, 'm> PyiEmitter<'a, 'm> {
         }
 
         let bases_suffix = match class.r#type {
-            ClassType::Class => {
+            ClassType::Class | ClassType::Enum => {
                 if class_path != "java.lang.Object" && class.extends.is_none() {
                     let object_base = "java.lang.Object".to_string();
                     if !rendered_bases.bases.iter().any(|base| base == &object_base) {
@@ -295,7 +295,7 @@ impl<'a, 'm> PyiEmitter<'a, 'm> {
                     format!("({})", rendered_bases.bases.join(", "))
                 }
             }
-            ClassType::Interface | ClassType::Enum => {
+            ClassType::Interface => {
                 if rendered_bases.bases.is_empty() {
                     "(java.lang.Object)".to_string()
                 } else {
@@ -853,13 +853,15 @@ fn java_stdlib_python_base(
     }
 }
 
-fn base_types<'a>(class: &'a ir::Class<'a>) -> impl Iterator<Item = &'a Type<'a>> {
-    let extends = match class.r#type {
-        ClassType::Class => class.extends.as_ref(),
-        ClassType::Interface | ClassType::Enum => None,
-    };
+fn base_types<'s, 'a>(class: &'s ir::Class<'a>) -> impl Iterator<Item = &'s Type<'a>> {
+    extends_of(class).into_iter().chain(class.implements)
+}
 
-    extends.into_iter().chain(class.implements)
+fn extends_of<'s, 'a>(class: &'s ir::Class<'a>) -> Option<&'s Type<'a>> {
+    match class.r#type {
+        ClassType::Class | ClassType::Enum => class.extends.as_ref(),
+        ClassType::Interface => None,
+    }
 }
 
 fn collect_base_types<'a>(
@@ -871,7 +873,7 @@ fn collect_base_types<'a>(
     let mut bases = Vec::with_capacity(class.implements.len() + 1);
     let mut unknown = Vec::new();
 
-    let mut is_first_supertype = class.r#type == ClassType::Class && class.extends.is_some();
+    let mut is_first_supertype = extends_of(class).is_some();
 
     for supertype in base_types(class) {
         let rendered = type_renderer.render(supertype, index_tree, type_params);
@@ -947,12 +949,7 @@ fn declared_type_params<'a>(
 }
 
 fn collect_param_refs<'a>(class: &ir::Class<'a>, into: &mut BTreeSet<&'a str>) {
-    let extends = match class.r#type {
-        ClassType::Class => class.extends.as_ref(),
-        ClassType::Interface | ClassType::Enum => None,
-    };
-
-    for supertype in extends.into_iter().chain(class.implements) {
+    for supertype in base_types(class) {
         collect_type_param_refs(supertype, into);
     }
 
