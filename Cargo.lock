@@ -270,7 +270,7 @@ checksum = "a6cb138bb79a146c1bd460005623e142ef0181e3d0219cb493e02f7d08a35695"
 
 [[package]]
 name = "java2pyi"
-version = "2.0.1"
+version = "2.0.2"
 dependencies = [
  "anyhow",
  "bitflags 2.13.1",
