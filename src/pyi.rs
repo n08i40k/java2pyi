@@ -614,21 +614,31 @@ fn group_methods<'a>(methods: &'a [Method<'a>]) -> Vec<Vec<&'a Method<'a>>> {
         .collect()
 }
 
+fn is_unknown_char(c: char) -> bool {
+    !matches!(c, '0'..='9' | 'a'..='z' | 'A'..='Z' | '_')
+}
+
+fn is_unsanitized(ident: &str) -> bool {
+    is_python_keyword(ident) || ident.contains(is_unknown_char)
+}
+
 fn sanitize_ident(ident: &str) -> Cow<'_, str> {
     if is_python_keyword(ident) {
         Cow::Owned(format!("{}_", ident))
-    } else if ident.contains('$') {
-        Cow::Owned(ident.replace('$', "_"))
+    } else if ident.contains(is_unknown_char) {
+        Cow::Owned(
+            ident
+                .chars()
+                .map(|c| if is_unknown_char(c) { '_' } else { c })
+                .collect::<String>(),
+        )
     } else {
         Cow::Borrowed(ident)
     }
 }
 
 fn sanitize_path(path: &str) -> Cow<'_, str> {
-    if path
-        .split('.')
-        .any(|segment| matches!(sanitize_ident(segment), Cow::Owned(_)))
-    {
+    if path.split('.').any(is_unsanitized) {
         Cow::Owned(
             path.split('.')
                 .map(sanitize_ident)
