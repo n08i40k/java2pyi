@@ -886,7 +886,7 @@ fn collect_base_types<'a>(
     let mut is_first_supertype = extends_of(class).is_some();
 
     for supertype in base_types(class) {
-        let rendered = type_renderer.render(supertype, index_tree, type_params);
+        let rendered = type_renderer.render(supertype, index_tree, type_params, true);
         unknown.extend(rendered.unknown);
 
         if is_first_supertype && !unknown.is_empty() {
@@ -1105,8 +1105,9 @@ impl<'a, 'm> TypeRenderer<'a, 'm> {
         ty: &Type<'_>,
         index_tree: &GlobalIndexTree,
         type_params: &BTreeSet<String>,
+        forbid_mix: bool,
     ) -> RenderedType {
-        let mut rendered = self.render_base(ty, index_tree, type_params);
+        let mut rendered = self.render_base(ty, index_tree, type_params, forbid_mix);
 
         for _ in 0..array_depth(ty) {
             rendered.text = format!("list[{}]", rendered.text);
@@ -1120,11 +1121,12 @@ impl<'a, 'm> TypeRenderer<'a, 'm> {
         ty: &Type<'_>,
         index_tree: &GlobalIndexTree,
         type_params: &BTreeSet<String>,
+        forbid_mix: bool,
     ) -> RenderedType {
         match base_type(ty) {
             Type::ParameterUnbound => RenderedType::known("Any".to_string()),
             Type::ParameterUpperBound(bound) | Type::ParameterLowerBound(bound) => {
-                let rendered = self.render(bound, index_tree, type_params);
+                let rendered = self.render(bound, index_tree, type_params, forbid_mix);
                 RenderedType {
                     text: "Any".to_string(),
                     unknown: rendered.unknown,
@@ -1139,6 +1141,7 @@ impl<'a, 'm> TypeRenderer<'a, 'm> {
                     type_args(object),
                     index_tree,
                     type_params,
+                    forbid_mix,
                 ),
                 None => RenderedType::unknown(object),
             },
@@ -1158,7 +1161,7 @@ impl<'a, 'm> TypeRenderer<'a, 'm> {
         index_tree: &GlobalIndexTree,
         type_params: &BTreeSet<String>,
     ) -> RenderedType {
-        let rendered = self.render(ty, index_tree, type_params);
+        let rendered = self.render(ty, index_tree, type_params, false);
         if !rendered.has_unknown() {
             return rendered;
         }
@@ -1180,7 +1183,8 @@ impl<'a, 'm> TypeRenderer<'a, 'm> {
             return rendered;
         }
 
-        let mut nested = self.render_named_type(candidate, type_args(ty), index_tree, type_params);
+        let mut nested =
+            self.render_named_type(candidate, type_args(ty), index_tree, type_params, false);
         for _ in 0..array_depth(ty) {
             nested.text = format!("list[{}]", nested.text);
         }
@@ -1200,6 +1204,7 @@ impl<'a, 'm> TypeRenderer<'a, 'm> {
             type_args(ty),
             index_tree,
             type_params,
+            false,
         );
 
         for _ in 0..array_depth(ty) {
@@ -1215,17 +1220,22 @@ impl<'a, 'm> TypeRenderer<'a, 'm> {
         arguments: &[Type<'_>],
         index_tree: &GlobalIndexTree,
         type_params: &BTreeSet<String>,
+        forbid_mix: bool,
     ) -> RenderedType {
         let base = sanitize_path(&base);
 
         if arguments.is_empty() {
-            return RenderedType::known(self.mixer.try_mix(&base));
+            if forbid_mix {
+                return RenderedType::known(base.to_string());
+            } else {
+                return RenderedType::known(self.mixer.try_mix(&base));
+            }
         }
 
         let mut unknown = Vec::new();
         let mut args = Vec::with_capacity(arguments.len());
         for argument in arguments {
-            let rendered = self.render(argument, index_tree, type_params);
+            let rendered = self.render(argument, index_tree, type_params, forbid_mix);
             unknown.extend(rendered.unknown);
             args.push(rendered.text);
         }
