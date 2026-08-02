@@ -17,6 +17,9 @@ use rayon::prelude::{IntoParallelIterator, ParallelIterator};
 const PYI_PACKAGE: &str = "java2pyi";
 const PYI_TYPES_SUBPACKAGE: &str = "types";
 
+const OBJECT_PATH: &str = "java.lang.Object";
+const OBJECT_MODULE: &str = "java.lang";
+
 pub fn write_pyi_by_package<'a, E>(
     scopes: &[Scope<'a>],
     mixer_records: HashMap<String, String>,
@@ -48,8 +51,17 @@ where
     scopes_by_package
         .into_par_iter()
         .try_for_each(|(package, package_scopes)| {
-            let module_imports =
+            let mut module_imports =
                 collect_module_imports(&package_scopes, &definition_paths, &exclusions);
+
+            let own_module = package.trim().trim_matches('.');
+            if !own_module.is_empty() {
+                module_imports.insert(own_module.to_string());
+            }
+
+            if definition_paths.known_paths.contains(OBJECT_PATH) {
+                module_imports.insert(OBJECT_MODULE.to_string());
+            }
 
             let has_deprecated = sanitize_path(package) != package
                 || package_scopes.iter().any(|scope| {
@@ -101,7 +113,7 @@ where
         })?;
 
     let mixer_package = format!("{PYI_PACKAGE}.{PYI_TYPES_SUBPACKAGE}");
-    write_package(&mixer_package, mixer.gen_stub())
+    write_package(&mixer_package, mixer.gen_stub(&definition_paths))
 }
 
 struct MixerEntry {
@@ -127,6 +139,10 @@ impl MixerEntry {
             "{} = Union[{}, {}]",
             self.union_name, self.from_java_ty, self.to_python_ty
         )
+    }
+
+    pub fn gen_python_only(&self) -> String {
+        format!("{} = {}", self.union_name, self.to_python_ty)
     }
 }
 
@@ -162,12 +178,19 @@ impl Mixer {
             .unwrap_or_else(|| java_ty.to_string())
     }
 
-    pub fn gen_stub(&self) -> String {
+    pub fn gen_stub(&self, definition_paths: &DefinitionPaths<'_>) -> String {
         let mut entries = self.records.values().collect::<Vec<_>>();
         entries.sort_by(|left, right| left.from_java_ty.cmp(&right.from_java_ty));
 
+        let is_known = |entry: &MixerEntry| {
+            definition_paths
+                .known_paths
+                .contains(entry.from_java_ty.as_str())
+        };
+
         let mut namespaces = entries
             .iter()
+            .filter(|entry| is_known(entry))
             .map(|entry| entry.from_java_ty.rsplit_once(".").unwrap().0)
             .collect::<Vec<_>>();
         namespaces.dedup();
@@ -180,7 +203,13 @@ impl Mixer {
 
         let body = entries
             .into_iter()
-            .map(MixerEntry::gen_union)
+            .map(|entry| {
+                if is_known(entry) {
+                    entry.gen_union()
+                } else {
+                    entry.gen_python_only()
+                }
+            })
             .collect::<Box<[_]>>()
             .join("\n");
 
@@ -196,6 +225,7 @@ struct PyiEmitter<'a, 'm> {
     module_imports: BTreeSet<String>,
     exclusions: Arc<Exclusions<'a>>,
     deferred: VecDeque<DeferredClass<'a>>,
+    object_known: bool,
 }
 
 struct DeferredClass<'a> {
@@ -210,6 +240,8 @@ impl<'a, 'm> PyiEmitter<'a, 'm> {
         mixer: &'m Mixer,
         exclusions: Arc<Exclusions<'a>>,
     ) -> Self {
+        let object_known = definition_paths.known_paths.contains(OBJECT_PATH);
+
         Self {
             output: String::new(),
             indent: 0,
@@ -218,6 +250,7 @@ impl<'a, 'm> PyiEmitter<'a, 'm> {
             module_imports,
             exclusions,
             deferred: VecDeque::new(),
+            object_known,
         }
     }
 
@@ -265,8 +298,13 @@ impl<'a, 'm> PyiEmitter<'a, 'm> {
         let class_type_params = extend_type_params(outer_type_params, &declared_type_params);
         let type_params_suffix = format_type_params(&declared_type_params);
         let class_path = self.definition_paths.path(&class_cell);
-        let mut rendered_bases =
-            collect_base_types(class, &self.type_renderer, index_tree, &class_type_params);
+        let mut rendered_bases = collect_base_types(
+            class,
+            &self.type_renderer,
+            index_tree,
+            &class_type_params,
+            self.object_known,
+        );
         let mut inserted_special_base = false;
         if let Some(special_base) = java_stdlib_python_base(&class_path, class.type_params)
             && !rendered_bases
@@ -280,8 +318,8 @@ impl<'a, 'm> PyiEmitter<'a, 'm> {
 
         let bases_suffix = match class.r#type {
             ClassType::Class | ClassType::Enum => {
-                if class_path != "java.lang.Object" && class.extends.is_none() {
-                    let object_base = "java.lang.Object".to_string();
+                if self.object_known && class_path != OBJECT_PATH && class.extends.is_none() {
+                    let object_base = OBJECT_PATH.to_string();
                     if !rendered_bases.bases.iter().any(|base| base == &object_base) {
                         let insert_at = if inserted_special_base { 1 } else { 0 };
                         let bounded_index = insert_at.min(rendered_bases.bases.len());
@@ -295,13 +333,14 @@ impl<'a, 'm> PyiEmitter<'a, 'm> {
                     format!("({})", rendered_bases.bases.join(", "))
                 }
             }
-            ClassType::Interface => {
-                if rendered_bases.bases.is_empty() {
-                    "(java.lang.Object)".to_string()
-                } else {
-                    format!("(java.lang.Object, {})", rendered_bases.bases.join(", "))
+            ClassType::Interface => match (self.object_known, rendered_bases.bases.is_empty()) {
+                (false, true) => String::new(),
+                (false, false) => format!("({})", rendered_bases.bases.join(", ")),
+                (true, true) => format!("({})", OBJECT_PATH),
+                (true, false) => {
+                    format!("({}, {})", OBJECT_PATH, rendered_bases.bases.join(", "))
                 }
-            }
+            },
         };
 
         let emitted_name = sanitize_ident(class.name);
@@ -879,6 +918,7 @@ fn collect_base_types<'a>(
     type_renderer: &TypeRenderer<'a, '_>,
     index_tree: &GlobalIndexTree<'a>,
     type_params: &BTreeSet<String>,
+    object_known: bool,
 ) -> RenderedBases {
     let mut bases = Vec::with_capacity(class.implements.len() + 1);
     let mut unknown = Vec::new();
@@ -890,7 +930,9 @@ fn collect_base_types<'a>(
         unknown.extend(rendered.unknown);
 
         if is_first_supertype && !unknown.is_empty() {
-            bases.push("java.lang.Object".to_string());
+            if object_known {
+                bases.push(OBJECT_PATH.to_string());
+            }
         } else {
             bases.push(rendered.text);
         }
