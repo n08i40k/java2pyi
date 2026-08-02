@@ -226,6 +226,8 @@ struct PyiEmitter<'a, 'm> {
     exclusions: Arc<Exclusions<'a>>,
     deferred: VecDeque<DeferredClass<'a>>,
     object_known: bool,
+    object_class: Option<Option<ClassRef<'a>>>,
+    ancestors: HashMap<ClassRef<'a>, Arc<HashSet<ClassRef<'a>>>>,
 }
 
 struct DeferredClass<'a> {
@@ -251,7 +253,100 @@ impl<'a, 'm> PyiEmitter<'a, 'm> {
             exclusions,
             deferred: VecDeque::new(),
             object_known,
+            object_class: None,
+            ancestors: HashMap::new(),
         }
+    }
+
+    fn object_class(&mut self, index_tree: &GlobalIndexTree<'a>) -> Option<ClassRef<'a>> {
+        *self
+            .object_class
+            .get_or_insert_with(|| index_tree.search_path(OBJECT_PATH.split('.')))
+    }
+
+    fn ancestors(
+        &mut self,
+        class: ClassRef<'a>,
+        index_tree: &GlobalIndexTree<'a>,
+    ) -> Arc<HashSet<ClassRef<'a>>> {
+        if let Some(cached) = self.ancestors.get(&class) {
+            return cached.clone();
+        }
+
+        let empty = Arc::new(HashSet::new());
+        self.ancestors.insert(class, empty.clone());
+
+        let empty_type_params = BTreeSet::new();
+        let mut supertypes = base_types(&class)
+            .filter_map(|supertype| resolve_type(index_tree, supertype, &empty_type_params))
+            .collect::<Vec<_>>();
+
+        if implicit_object_base(&class)
+            && let Some(object_class) = self.object_class(index_tree)
+            && object_class != class
+        {
+            supertypes.push(object_class);
+        }
+
+        let mut collected = HashSet::new();
+        for supertype in supertypes {
+            collected.insert(supertype);
+            collected.extend(self.ancestors(supertype, index_tree).iter().copied());
+        }
+
+        let collected = Arc::new(collected);
+        self.ancestors.insert(class, collected.clone());
+        collected
+    }
+
+    fn order_bases(&mut self, bases: &mut Vec<RenderedBase<'a>>, index_tree: &GlobalIndexTree<'a>) {
+        if bases.len() < 2 {
+            return;
+        }
+
+        let ancestors = bases
+            .iter()
+            .map(|base| {
+                base.class
+                    .map(|class| self.ancestors(class, index_tree))
+                    .unwrap_or_default()
+            })
+            .collect::<Vec<_>>();
+        let mut index = 0;
+        bases.retain(|base| {
+            let redundant = base.class.is_some_and(|class| {
+                ancestors
+                    .iter()
+                    .enumerate()
+                    .any(|(other, other_ancestors)| {
+                        other != index && other_ancestors.contains(&class)
+                    })
+            });
+            index += 1;
+            !redundant
+        });
+
+        let mut ordered: Vec<RenderedBase<'a>> = Vec::with_capacity(bases.len());
+        for base in bases.drain(..) {
+            let position = match base.class {
+                Some(class) => {
+                    let ancestors = self.ancestors(class, index_tree);
+                    ordered
+                        .iter()
+                        .position(|placed| {
+                            placed
+                                .class
+                                .is_some_and(|placed| ancestors.contains(&placed))
+                        })
+                        .unwrap_or(ordered.len())
+                }
+                None => ordered.len(),
+            };
+
+            ordered.insert(position, base);
+        }
+
+        *bases = ordered;
     }
 
     fn emit_header(&mut self, has_deprecated: bool) {
@@ -298,49 +393,38 @@ impl<'a, 'm> PyiEmitter<'a, 'm> {
         let class_type_params = extend_type_params(outer_type_params, &declared_type_params);
         let type_params_suffix = format_type_params(&declared_type_params);
         let class_path = self.definition_paths.path(&class_cell);
-        let mut rendered_bases = collect_base_types(
-            class,
-            &self.type_renderer,
-            index_tree,
-            &class_type_params,
-            self.object_known,
-        );
-        let mut inserted_special_base = false;
+        let mut rendered_bases =
+            collect_base_types(class, &self.type_renderer, index_tree, &class_type_params);
+        self.order_bases(&mut rendered_bases.bases, index_tree);
+
         if let Some(special_base) = java_stdlib_python_base(&class_path, class.type_params)
-            && !rendered_bases
-                .bases
-                .iter()
-                .any(|base| base == &special_base)
+            && !rendered_bases.contains(&special_base)
         {
-            rendered_bases.bases.insert(0, special_base);
-            inserted_special_base = true;
+            rendered_bases.bases.insert(
+                0,
+                RenderedBase {
+                    text: special_base,
+                    class: None,
+                },
+            );
         }
 
-        let bases_suffix = match class.r#type {
-            ClassType::Class | ClassType::Enum => {
-                if self.object_known && class_path != OBJECT_PATH && class.extends.is_none() {
-                    let object_base = OBJECT_PATH.to_string();
-                    if !rendered_bases.bases.iter().any(|base| base == &object_base) {
-                        let insert_at = if inserted_special_base { 1 } else { 0 };
-                        let bounded_index = insert_at.min(rendered_bases.bases.len());
-                        rendered_bases.bases.insert(bounded_index, object_base);
-                    }
-                }
+        if self.object_known
+            && (implicit_object_base(class) || rendered_bases.unresolved_extends)
+            && class_path != OBJECT_PATH
+            && !rendered_bases.contains(OBJECT_PATH)
+        {
+            let object_class = self.object_class(index_tree);
+            rendered_bases.bases.push(RenderedBase {
+                text: OBJECT_PATH.to_string(),
+                class: object_class,
+            });
+        }
 
-                if rendered_bases.bases.is_empty() {
-                    String::new()
-                } else {
-                    format!("({})", rendered_bases.bases.join(", "))
-                }
-            }
-            ClassType::Interface => match (self.object_known, rendered_bases.bases.is_empty()) {
-                (false, true) => String::new(),
-                (false, false) => format!("({})", rendered_bases.bases.join(", ")),
-                (true, true) => format!("({})", OBJECT_PATH),
-                (true, false) => {
-                    format!("({}, {})", OBJECT_PATH, rendered_bases.bases.join(", "))
-                }
-            },
+        let bases_suffix = if rendered_bases.bases.is_empty() {
+            String::new()
+        } else {
+            format!("({})", rendered_bases.join())
         };
 
         let emitted_name = sanitize_ident(class.name);
@@ -868,9 +952,29 @@ fn collect_module_imports<'a>(
     modules
 }
 
-struct RenderedBases {
-    bases: Vec<String>,
+struct RenderedBase<'a> {
+    text: String,
+    class: Option<ClassRef<'a>>,
+}
+
+struct RenderedBases<'a> {
+    bases: Vec<RenderedBase<'a>>,
     unknown: Box<[String]>,
+    unresolved_extends: bool,
+}
+
+impl<'a> RenderedBases<'a> {
+    fn contains(&self, text: &str) -> bool {
+        self.bases.iter().any(|base| base.text == text)
+    }
+
+    fn join(&self) -> String {
+        self.bases
+            .iter()
+            .map(|base| base.text.as_str())
+            .collect::<Box<[_]>>()
+            .join(", ")
+    }
 }
 
 fn generic_ident_or_any(type_params: &[TypeParameter<'_>], index: usize) -> String {
@@ -902,6 +1006,13 @@ fn java_stdlib_python_base(
     }
 }
 
+fn implicit_object_base(class: &ir::Class<'_>) -> bool {
+    match class.r#type {
+        ClassType::Interface => true,
+        ClassType::Class | ClassType::Enum => class.extends.is_none(),
+    }
+}
+
 fn base_types<'s, 'a>(class: &'s ir::Class<'a>) -> impl Iterator<Item = &'s Type<'a>> {
     extends_of(class).into_iter().chain(class.implements)
 }
@@ -918,10 +1029,10 @@ fn collect_base_types<'a>(
     type_renderer: &TypeRenderer<'a, '_>,
     index_tree: &GlobalIndexTree<'a>,
     type_params: &BTreeSet<String>,
-    object_known: bool,
-) -> RenderedBases {
+) -> RenderedBases<'a> {
     let mut bases = Vec::with_capacity(class.implements.len() + 1);
     let mut unknown = Vec::new();
+    let mut unresolved_extends = false;
 
     let mut is_first_supertype = extends_of(class).is_some();
 
@@ -930,11 +1041,12 @@ fn collect_base_types<'a>(
         unknown.extend(rendered.unknown);
 
         if is_first_supertype && !unknown.is_empty() {
-            if object_known {
-                bases.push(OBJECT_PATH.to_string());
-            }
+            unresolved_extends = true;
         } else {
-            bases.push(rendered.text);
+            bases.push(RenderedBase {
+                text: rendered.text,
+                class: resolve_type(index_tree, supertype, type_params),
+            });
         }
 
         is_first_supertype = false;
@@ -943,6 +1055,7 @@ fn collect_base_types<'a>(
     RenderedBases {
         bases,
         unknown: unknown.into_boxed_slice(),
+        unresolved_extends,
     }
 }
 
